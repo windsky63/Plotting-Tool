@@ -1,0 +1,73 @@
+# Build artifacts
+build/
+build_prod/
+dist/
+coverage/
+
+# Node / package managers
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.pnp.*
+*.tsbuildinfo
+.eslintcache
+
+# Logs and runtime traces
+logs/
+*.log
+*.out
+*.err
+*.pid
+*.pid.lock
+.env
+.env.*
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.venv*/
+venv/
+env/
+
+# IDE / editor metadata
+.idea/
+.vscode/
+.cursor/
+
+# Project-specific OCR / MinerU runtime data
+mineru/.docker-cache/
+mineru/.venv/
+mineru/.venv-*/
+mineru/.venv311/
+mineru/__pycache__/
+mineru/outputs/
+mineru/uploads/
+mineru/*.log
+mineru/*.out.log
+mineru/*.err.log
+mineru/test_*.png
+mineru/test_*.pdf
+
+ocr_server/.venv311/
+ocr_server/hf_home/
+ocr_server/logs/
+ocr_server/models/
+ocr_server/models11/
+ocr_server/paddlex_cache/
+ocr_server/paddle_home/
+ocr_server/python/logs/
+ocr_server/python/models/
+ocr_server/python/__pycache__/
+ocr_server/python/*.log
+ocr_server/xdg_cache/
+ocr_server/_internal/
+support_qa/autosave_drafts/
+
+# Misc temporary files
+temp_*
+tmp_*

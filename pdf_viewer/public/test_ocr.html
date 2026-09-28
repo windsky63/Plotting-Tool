@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR功能测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .test-section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status.success {
+            background: #f6ffed;
+            border: 1px solid #b7eb8f;
+            color: #52c41a;
+        }
+        .status.error {
+            background: #fff2f0;
+            border: 1px solid #ffccc7;
+            color: #ff4d4f;
+        }
+        .status.info {
+            background: #f0f9ff;
+            border: 1px solid #91d5ff;
+            color: #1890ff;
+        }
+        button {
+            background: #1890ff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #40a9ff;
+        }
+        button:disabled {
+            background: #d9d9d9;
+            cursor: not-allowed;
+        }
+        .log {
+            background: #f8f8f8;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>OCR功能测试页面</h1>
+        <p>此页面用于测试OCR功能的各个环节，请按顺序执行测试。</p>
+        
+        <div class="test-section">
+            <h3>1. 环境检查</h3>
+            <button onclick="checkEnvironment()">检查环境</button>
+            <div id="env-status"></div>
+        </div>
+        
+        <div class="test-section">
+            <h3>2. PDF加载检查</h3>
+            <button onclick="checkPDF()">检查PDF</button>
+            <div id="pdf-status"></div>
+        </div>
+        
+        <div class="test-section">
+            <h3>3. OCR事件测试</h3>
+            <button onclick="testOCREvents()">测试OCR事件</button>
+            <div id="ocr-status"></div>
+        </div>
+        
+        <div class="test-section">
+            <h3>4. 模拟用户操作</h3>
+            <button onclick="simulateUserFlow()">模拟完整流程</button>
+            <div id="flow-status"></div>
+        </div>
+        
+        <div class="test-section">
+            <h3>5. 调试日志</h3>
+            <button onclick="clearLog()">清空日志</button>
+            <div id="debug-log" class="log"></div>
+        </div>
+    </div>
+    
+    <script>
+        let logContainer = null;
+        
+        function log(message, type = 'info') {
+            if (!logContainer) {
+                logContainer = document.getElementById('debug-log');
+            }
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.innerHTML = `[${timestamp}] ${message}`;
+            logContainer.appendChild(logEntry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(`[OCR测试] ${message}`);
+        }
+        
+        function setStatus(elementId, message, type = 'info') {
+            const element = document.getElementById(elementId);
+            element.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+        
+        function clearLog() {
+            document.getElementById('debug-log').innerHTML = '';
+        }
+        
+        function checkEnvironment() {
+            log('开始环境检查...');
+            
+            // 检查是否在Electron环境中
+            const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+            log(`Electron环境: ${isElectron ? '✅' : '❌'}`);
+            
+            if (isElectron) {
+                const apiMethods = Object.keys(window.electronAPI);
+                log(`可用API方法: ${apiMethods.join(', ')}`);
+                
+                // 检查OCR相关方法
+                const ocrMethods = ['runMaterialOCR', 'onOCRProgress', 'onOCRResult', 'removeOCRListeners'];
+                const missingMethods = ocrMethods.filter(method => typeof window.electronAPI[method] !== 'function');
+                
+                if (missingMethods.length === 0) {
+                    setStatus('env-status', '✅ 环境检查通过，所有OCR方法都可用', 'success');
+                    log('环境检查通过');
+                } else {
+                    setStatus('env-status', `❌ 缺少OCR方法: ${missingMethods.join(', ')}`, 'error');
+                    log(`缺少OCR方法: ${missingMethods.join(', ')}`);
+                }
+            } else {
+                setStatus('env-status', '❌ 当前不在Electron环境中', 'error');
+                log('当前不在Electron环境中');
+            }
+        }
+        
+        function checkPDF() {
+            log('检查PDF加载状态...');
+            
+            const pdfCanvas = document.querySelector('.react-pdf__Page canvas');
+            if (pdfCanvas) {
+                log(`找到PDF Canvas，尺寸: ${pdfCanvas.width}x${pdfCanvas.height}`);
+                setStatus('pdf-status', `✅ PDF已加载，Canvas尺寸: ${pdfCanvas.width}x${pdfCanvas.height}`, 'success');
+            } else {
+                log('未找到PDF Canvas');
+                setStatus('pdf-status', '❌ 未找到PDF Canvas，请先加载PDF文件', 'error');
+            }
+        }
+        
+        function testOCREvents() {
+            log('测试OCR事件系统...');
+            
+            try {
+                // 测试区域选择事件
+                log('触发区域选择事件');
+                window.dispatchEvent(new CustomEvent('ocr-action', { 
+                    detail: { action: 'startRegion' } 
+                }));
+                
+                setTimeout(() => {
+                    // 测试开始OCR事件
+                    log('触发OCR识别事件');
+                    window.dispatchEvent(new CustomEvent('ocr-action', { 
+                        detail: { action: 'startOCR' } 
+                    }));
+                }, 1000);
+                
+                setStatus('ocr-status', '✅ OCR事件已触发，请查看控制台日志', 'success');
+            } catch (error) {
+                log(`OCR事件测试失败: ${error.message}`);
+                setStatus('ocr-status', `❌ OCR事件测试失败: ${error.message}`, 'error');
+            }
+        }
+        
+        function simulateUserFlow() {
+            log('开始模拟完整用户流程...');
+            
+            const steps = [
+                { name: '检查环境', action: checkEnvironment },
+                { name: '检查PDF', action: checkPDF },
+                { name: '开始区域选择', action: () => {
+                    log('步骤: 开始区域选择');
+                    window.dispatchEvent(new CustomEvent('ocr-action', { 
+                        detail: { action: 'startRegion' } 
+                    }));
+                }},
+                { name: '等待用户绘制区域', action: () => {
+                    log('步骤: 等待用户绘制区域（请在PDF上拖拽选择区域）');
+                }},
+                { name: '开始OCR识别', action: () => {
+                    log('步骤: 开始OCR识别');
+                    window.dispatchEvent(new CustomEvent('ocr-action', { 
+                        detail: { action: 'startOCR' } 
+                    }));
+                }}
+            ];
+            
+            let currentStep = 0;
+            
+            function executeStep() {
+                if (currentStep < steps.length) {
+                    const step = steps[currentStep];
+                    log(`执行步骤 ${currentStep + 1}: ${step.name}`);
+                    step.action();
+                    currentStep++;
+                    
+                    if (currentStep < steps.length) {
+                        setTimeout(executeStep, 2000);
+                    } else {
+                        setStatus('flow-status', '✅ 完整流程模拟完成，请查看控制台日志', 'success');
+                    }
+                } else {
+                    setStatus('flow-status', '✅ 所有步骤已完成', 'success');
+                }
+            }
+            
+            executeStep();
+        }
+        
+        // 页面加载完成后自动检查环境
+        window.addEventListener('load', () => {
+            log('OCR测试页面已加载');
+            setTimeout(checkEnvironment, 500);
+        });
+        
+        // 监听OCR相关的控制台输出
+        const originalLog = console.log;
+        console.log = function(...args) {
+            const message = args.join(' ');
+            if (message.includes('🎯') || message.includes('🖱️') || message.includes('🔍')) {
+                log(message);
+            }
+            originalLog.apply(console, args);
+        };
+        
+        const originalError = console.error;
+        console.error = function(...args) {
+            const message = args.join(' ');
+            if (message.includes('🎯') || message.includes('🖱️') || message.includes('🔍')) {
+                log(`ERROR: ${message}`);
+            }
+            originalError.apply(console, args);
+        };
+    </script>
+</body>
+</html>

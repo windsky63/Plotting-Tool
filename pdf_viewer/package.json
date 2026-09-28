@@ -1,0 +1,149 @@
+{
+  "name": "pdf-single-line-welding-annotation",
+  "version": "1.0.0",
+  "description": "PDF单线图焊口预制标注工具",
+  "main": "public/electron.js",
+  "homepage": "./",
+  "scripts": {
+    "electron": "electron .",
+    "electron-dev": "concurrently \"npm start\" \"wait-on http://localhost:3004 && electron .\"",
+    "electron-pack": "npm run pre-build-check && npm run build && electron-builder --config.npmRebuild=false",
+    "build-electron": "npm run pre-build-check && npm run build && electron-builder",
+    "start": "set PORT=3004&& set HOST=0.0.0.0&& set DANGEROUSLY_DISABLE_HOST_CHECK=true&& react-scripts start",
+    "serve-prod": "node scripts/prod_server_with_autosave_proxy.js",
+    "deploy": "npm run build && npm run serve-prod",
+    "prebuild": "node scripts/sync_pdfjs_worker.mjs",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "check-sizes": "node scripts/check-file-sizes.js",
+    "pre-build-check": "node scripts/pre-build-check.js",
+    "precommit": "npm run check-sizes",
+    "lint": "eslint src --ext .js,.jsx,.ts,.tsx",
+    "get-ip": "node scripts/get-local-ip.js",
+    "verify:pdfjs6": "node scripts/verify_pdfjs6_runtime.mjs",
+    "verify:pdfjs6-build": "node scripts/verify_pdfjs6_build.mjs",
+    "verify:pdfjs6-server": "node scripts/verify_pdfjs6_server.mjs"
+  },
+  "proxy": "http://211.138.201.11:8082",
+  "build": {
+    "productName": "PDF单线图焊口预制标注工具",
+    "appId": "com.welding.pdf-annotation-tool",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "build/**/*",
+      "public/electron.js",
+      "public/preload.js",
+      "public/electron-is-dev.js",
+      "public/app-config.json",
+      "preload.js",
+      "main.js",
+      "app.ico",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "ocr_server/",
+        "to": "ocr_server/",
+        "filter": [
+          "**/*",
+          "!runtime",
+          "!runtime/**/*",
+          "!python",
+          "!python/**/*"
+        ]
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "public/app-config.json",
+        "to": "app-config.json"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "./app.ico",
+      "artifactName": "PDF单线图焊口预制标注工具-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "./app.ico",
+      "uninstallerIcon": "./app.ico",
+      "installerHeaderIcon": "./app.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "nsis-${version}.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "./app.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "./app.ico"
+    },
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "buildDependenciesFromSource": false,
+    "asar": true,
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    }
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.2.6",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^7.3.6",
+    "antd": "^5.28.0",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^3.0.1",
+    "jszip": "^3.10.1",
+    "pdf-lib": "^1.17.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-pdf": "11.0.0",
+    "styled-components": "^6.1.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^23.6.0",
+    "http-server": "^14.1.1",
+    "pdfjs-dist": "6.3.289",
+    "react-scripts": "5.0.1",
+    "serve": "^14.2.6",
+    "wait-on": "^7.2.0"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}

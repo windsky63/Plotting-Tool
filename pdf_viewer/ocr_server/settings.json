@@ -1,0 +1,23 @@
+{
+  "confidence_threshold": 0.65,
+  "ocr_server_host": "0.0.0.0",
+  "ocr_server_port": 8766,
+  "device": "gpu",
+  "log_level": "WARN",
+  "log_dir": "logs",
+  "log_max_file_size": "10MB",
+  "log_backup_count": 30,
+  "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+  "log_date_format": "%Y-%m-%d %H:%M:%S",
+  "log_to_console": true,
+  "ocr_pool_size": 1,
+  "ocr_pool_timeout": 30.0,
+  "models_dir": "E:\\paddleocr",
+  "annotation_draft_dir": "E:\\paddleocr\\annotation_drafts",
+  "det_model": "PP-OCRv5_server_det",
+  "rec_model": "PP-OCRv5_server_rec",
+  "h3yun_engine_code": "ety58sf4upb95mibri9qatvi5",
+  "h3yun_engine_secret": "u3toDgywMDwgbYgnrHNmjzH0g0fzn9mWAj0PY659taS7sxeVPoor5g==",
+  "ssl_crt_file": "../../cert/njncc.com.crt",
+  "ssl_key_file": "../../cert/njncc.com.key"
+}

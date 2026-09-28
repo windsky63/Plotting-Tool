@@ -1,0 +1,142 @@
+
+
+.ant-layout {
+  background: #f5f5f5 !important;
+}
+
+.ant-layout-content {
+  background: #fff !important;
+}
+
+.ant-layout-sider {
+  background: #fafafa !important;
+  border-right: 1px solid #e8e8e8;
+}
+
+.ant-menu {
+  background: transparent !important;
+  border-right: none !important;
+}
+
+.ant-menu-item {
+  border-radius: 6px !important;
+  margin: 4px 8px !important;
+  width: auto !important;
+}
+
+.ant-btn {
+  border-radius: 6px !important;
+}
+
+.ant-input {
+  border-radius: 6px !important;
+}
+
+.ant-select-selector {
+  border-radius: 6px !important;
+}
+
+.ant-slider {
+  margin: 0 16px !important;
+}
+
+/* PDF渲染优化 */
+.react-pdf__Page {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+  margin-bottom: 16px !important;
+  border-radius: 4px !important;
+  overflow: hidden !important;
+}
+
+.react-pdf__Page__canvas {
+  /* Fractional DPR canvases are intentionally CSS-scaled. Browser smoothing
+     avoids the jagged, blocky result produced by pixelated/crisp-edges. */
+  image-rendering: auto !important;
+}
+
+/* 搜索高亮样式 */
+.pdf-search-highlight {
+  background-color: #fff3cd !important;
+  border: 1px solid #ffeaa7 !important;
+  border-radius: 2px !important;
+}
+
+.pdf-search-highlight.current {
+  background-color: #007acc !important;
+  color: white !important;
+}
+
+/* 加载动画 */
+.pdf-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  font-size: 16px;
+  color: #666;
+}
+
+.pdf-error {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  color: #ff4d4f;
+}
+
+/* 缩略图样式 */
+.thumbnail-container {
+  padding: 8px;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.thumbnail-container:hover {
+  border-color: #1890ff;
+  background-color: #f0f8ff;
+}
+
+.thumbnail-container.active {
+  border-color: #1890ff;
+  background-color: #e6f7ff;
+}
+
+.thumbnail-page {
+  width: 100%;
+  max-width: 120px;
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* 标注高亮样式 - 简单高亮，不使用动画 */
+.annotation-highlight {
+  box-shadow: 0 0 12px rgba(24, 144, 255, 0.8), 0 2px 8px rgba(0,0,0,0.3) !important;
+  border: 2px solid #1890ff !important;
+  background-color: rgba(24, 144, 255, 0.1) !important;
+  z-index: 1002 !important;
+}
+
+/* 标注信息表格行高亮 */
+.annotation-row-selected {
+  background-color: #e6f7ff !important;
+  border-left: 3px solid #1890ff !important;
+}
+
+/* Ensure toolbar-triggered popups are rendered above the fixed toolbar. */
+.ant-dropdown,
+.ant-popover,
+.ant-select-dropdown,
+.ant-picker-dropdown,
+.ant-tooltip {
+  z-index: 6001 !important;
+}
+
+/* Keep operation feedback below the fixed toolbar and above every viewer
+   overlay. This is especially important while the toolbar wraps to two rows. */
+.ant-message {
+  top: calc(var(--toolbar-screen-bottom, 56px) + 12px) !important;
+  z-index: 7000 !important;
+}

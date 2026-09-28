@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1890ff" />
+    <meta name="description" content="PDF单线图焊口预制标注工具" />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="apple-touch-icon" sizes="512x512" href="%PUBLIC_URL%/logo.svg" />
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    <script>
+      // Configure webpack dev server WebSocket client
+      window.__resourceQuery = '';
+      window.__webpack_dev_server_client__ = {
+        protocol: window.location.protocol === 'https:' ? 'wss:' : 'ws:',
+        hostname: '127.0.0.1',
+        port: Number(window.location.port || (window.location.protocol === 'https:' ? 443 : 80)),
+        pathname: '/ws'
+      };
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <title>PDF单线图焊口预制标注工具</title>
+  </head>
+  <body>
+    <noscript>您需要启用JavaScript来运行此应用程序。</noscript>
+    <div id="root">
+      <div class="loading">正在加载PDF查看器...</div>
+    </div>
+  </body>
+</html>

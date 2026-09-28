@@ -1,0 +1,11 @@
+{
+  "ocr_server_port": 8766,
+  "ocr_server_host": "192.168.32.61",
+  "mineru_base_url": "http://192.168.32.61:8081",
+  "weld_ai_server_url": "http://192.168.32.61:8767",
+  "weld_ai_use_same_origin_proxy": true,
+  "weld_ai_api_key": "c9772c1d574b4e44a17cb809983e6417",
+  "support_chat_url": "http://192.168.32.61:8788",
+  "ocr_backend": "exe",
+  "ocr_backend_exe_path": "ocr_server/ocr_server.exe"
+}

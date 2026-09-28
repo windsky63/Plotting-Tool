@@ -1,0 +1,56 @@
+# Dependencies and generated builds
+**/node_modules/
+**/build/
+**/build_prod/
+**/dist/
+**/coverage/
+
+# Runtime data, caches, and temporary output
+**/.runtime/
+**/runtime/
+**/.cache/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.py[cod]
+**/*.log
+**/*.out
+**/*.err
+**/*.pid
+**/*.pid.lock
+**/temp_*
+**/tmp_*
+
+# Local environments and secrets
+**/.env
+**/.env.*
+**/.venv/
+**/.venv*/
+**/venv/
+**/env/
+
+# Editor and OS metadata
+**/.idea/
+**/.vscode/
+**/.cursor/
+.DS_Store
+Thumbs.db
+
+# Large local OCR/model caches
+**/hf_home/
+**/models/
+**/models11/
+**/paddlex_cache/
+**/paddle_home/
+**/xdg_cache/
+**/_internal/
+**/uploads/
+**/outputs/
+
+# Generated deployment bundles (may contain machine-local configuration)
+releases/
+
+# Local deployment files containing machine credentials
+/root_scripts/start_remote_workstation.ps1
+/使用说明.md

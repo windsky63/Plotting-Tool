@@ -1,0 +1,3177 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IDF 分图点 MinerU 区域识别工具</title>
+  <style>
+    :root { --blue: #1677ff; --orange: #f59e0b; --border: #dce3eb; --muted: #66788a; --panel: #f7f9fc; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; overflow: hidden; font-family: Arial, "Microsoft YaHei", sans-serif; color: #243447; background: #edf1f5; }
+    header { height: 52px; display: flex; align-items: center; gap: 10px; padding: 0 18px; background: #fff; border-bottom: 1px solid var(--border); position: relative; z-index: 10; box-shadow: 0 1px 5px rgba(30, 50, 70, .07); }
+    header strong { font-size: 16px; margin-right: 10px; white-space: nowrap; }
+    button, select, input { height: 36px; border: 1px solid #c9d4df; border-radius: 5px; background: #fff; padding: 0 11px; font-size: 14px; color: #26384a; }
+    button { cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
+    button:hover:not(:disabled) { border-color: #7aaef7; background: #f2f7ff; }
+    button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+    button.primary:hover:not(:disabled) { background: #0f69e8; color: #fff; }
+    button.active { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 600; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #selectSplitPointRegion, #selectPipelineRegion,
+    #runCurrentPage, #runAllPages, #runPageRange, #exportExcel, #markCoordinateBoxes {
+      min-height: 42px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    #runAllPages { border-color: #79aef3; color: #135eae; background: #f4f8ff; }
+    #runPageRange { background: #334e68; border-color: #334e68; color: #fff; }
+    #exportExcel { background: #16805b; border-color: #16805b; color: #fff; }
+    #markCoordinateBoxes { background: #0ea5e9; border-color: #0ea5e9; color: #fff; }
+    #stopRecognition { min-height: 38px; background: #c83f49; border-color: #c83f49; color: #fff; font-weight: 600; }
+    #prevPage, #nextPage, #zoomOut, #zoomIn, #clearRegions, #regionType {
+      height: 30px;
+      min-height: 30px;
+      font-size: 12px;
+      font-weight: 400;
+    }
+    input[type="file"] { height: auto; min-height: 38px; padding: 4px; width: 100%; }
+    input[type="file"]::file-selector-button { height: 28px; margin-right: 10px; border: 0; border-radius: 4px; padding: 0 12px; background: #eaf2ff; color: #165fb8; cursor: pointer; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 440px; height: calc(100vh - 52px); }
+    #viewerPanel, #sidePanel { min-height: 0; }
+    #viewerPanel { position: relative; overflow: auto; padding: 24px; border-right: 1px solid var(--border); background: #e9eef3; }
+    #stage { position: relative; margin: 0 auto; background: #fff; box-shadow: 0 4px 18px rgba(31, 52, 73, .18); transform-origin: top left; }
+    #emptyState { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+    #emptyState span { padding: 14px 24px; border: 1px dashed #b8c5d2; border-radius: 6px; color: #718096; background: rgba(255,255,255,.75); font-size: 15px; }
+    #pdfCanvas { display: block; }
+    #overlay { position: absolute; inset: 0; cursor: crosshair; }
+    .regionBox { position: absolute; border: 2px solid; pointer-events: none; }
+    .regionBox .label { position: absolute; left: -2px; top: -24px; color: #fff; font-size: 12px; padding: 3px 6px; border-radius: 3px 3px 0 0; white-space: nowrap; }
+    #splitPointBox { border-color: #1677ff; background: rgba(22, 119, 255, .12); }
+    #splitPointBox .label { background: #1677ff; }
+    #pipelineNumberBox { border-color: #fa8c16; background: rgba(250, 140, 22, .15); }
+    #pipelineNumberBox .label { background: #fa8c16; }
+    #draftBox { border-color: #722ed1; border-style: dashed; background: rgba(114, 46, 209, .12); }
+    #draftBox .label { background: #722ed1; }
+    .coordOverlayBox { position: absolute; border: 2px solid rgba(34, 197, 94, .95); background: rgba(34, 197, 94, .12); border-radius: 4px; pointer-events: none; box-shadow: 0 0 0 1px rgba(255,255,255,.65); }
+    .coordOverlayBox.inferred { border-color: rgba(250, 204, 21, .95); background: rgba(250, 204, 21, .14); }
+    .coordOverlayBox.ocr { border-color: rgba(34, 197, 94, .95); background: rgba(34, 197, 94, .12); }
+    .coordOverlayBox.ocr.inferred { border-color: rgba(250, 204, 21, .95); background: rgba(250, 204, 21, .14); }
+    .coordOverlayBox .label { position: absolute; left: -2px; top: -21px; height: 20px; line-height: 20px; padding: 0 6px; color: #fff; background: rgba(22, 163, 74, .96); border-radius: 3px 3px 0 0; font-size: 12px; white-space: nowrap; }
+    .coordOverlayBox.inferred .label { background: rgba(202, 138, 4, .96); }
+    .coordOverlayBox.ocr .label { background: rgba(22, 163, 74, .96); }
+    .coordOverlayBox.ocr.inferred .label { background: rgba(202, 138, 4, .96); }
+    #sidePanel { padding: 14px 16px 20px; overflow: auto; background: var(--panel); }
+    .section { padding: 14px 0 16px; border-bottom: 1px solid var(--border); }
+    .section:first-child { padding-top: 2px; }
+    .section:last-child { border-bottom: 0; }
+    .section > strong { display: block; margin-bottom: 10px; font-size: 15px; color: #1f3449; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+    .row.vertical { align-items: stretch; flex-direction: column; }
+    .row.vertical button, .row.vertical select, .row.vertical input { width: 100%; }
+    .row > button { flex: 1 1 0; }
+    .row label { color: var(--muted); font-size: 13px; }
+    #regionType { flex: 1; min-width: 150px; }
+    #pageRangeInput { flex: 1; min-width: 0; }
+    #status { min-height: 24px; padding-top: 6px; color: #3d566e; font-size: 13px; }
+    #progressWrap { height: 6px; background: #dfe6ee; border-radius: 99px; overflow: hidden; }
+    #progress { width: 0%; height: 100%; background: #1677ff; transition: width .2s; }
+    #regionInfo, #result { white-space: pre-wrap; font-family: Consolas, "Microsoft YaHei", monospace; font-size: 12px; line-height: 1.55; }
+    #regionInfo { margin-top: 10px; background: #fff; border: 1px solid var(--border); border-radius: 5px; padding: 10px; color: #526577; }
+    #result { min-height: 260px; height: 42vh; overflow: auto; background: #172233; color: #dce8f4; border: 1px solid #26384d; border-radius: 5px; padding: 10px; line-height: 1.25; }
+    .resultSection { margin-bottom: 10px; }
+    .resultSectionTitle { color: #93c5fd; font-weight: 700; margin-bottom: 5px; }
+    .resultSplitGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .resultPage { border: 1px solid rgba(148, 163, 184, .28); border-radius: 6px; padding: 8px; margin-bottom: 10px; background: rgba(15, 23, 42, .44); }
+    .resultPageHeader { display: flex; justify-content: space-between; gap: 8px; color: #e2e8f0; font-weight: 700; margin-bottom: 7px; }
+    .coordGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 7px; }
+    .coordBlock { border: 1px solid rgba(56, 189, 248, .82); border-left: 4px solid #38bdf8; border-radius: 6px; padding: 7px 9px; background: rgba(8, 47, 73, .62); color: #e0f2fe; }
+    .coordBlock.inferred { border-color: rgba(250, 204, 21, .86); border-left-color: #facc15; background: rgba(113, 63, 18, .42); color: #fef9c3; }
+    .coordLabel { color: #7dd3fc; font-weight: 700; }
+    .coordBlock.inferred .coordLabel { color: #fde68a; }
+    .splitPointCard { border-left: 2px solid #22c55e; padding: 6px 8px; min-height: 62px; border-radius: 6px; margin-bottom: 0; background: rgba(20, 83, 45, .24); color: #dcfce7; font-size: 10px; line-height: 1.3; }
+    .splitPointCard.inferred { border-color: rgba(250, 204, 21, .86); border-left-color: #facc15; background: rgba(113, 63, 18, .42); color: #fef9c3; }
+    .splitPointTitle { display: flex; justify-content: space-between; gap: 6px; color: #bbf7d0; font-weight: 700; margin-bottom: 4px; font-size: 11px; }
+    .splitPointTitle span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .splitPointCoords { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+    .splitPointCoords.multi { flex-direction: column; align-items: flex-start; gap: 2px; white-space: normal; }
+    .splitPointCoordLine { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .splitPointCoordIndex { color: #fde68a; font-weight: 700; min-width: 44px; }
+    .splitPointMeta { color: #dbeafe; font-size: 10px; margin-top: 4px; white-space: normal; }
+    .pageTextResult { margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid rgba(148, 163, 184, .18); font-size: 10px; line-height: 1.15; }
+    .pageTextHeader { color: #bfdbfe; font-weight: 700; margin-bottom: 1px; }
+    .pageTextCoord { color: #dce8f4; white-space: nowrap; line-height: 1.12; }
+    .resultLine { color: #dce8f4; margin: 1px 0; line-height: 1.22; }
+    .resultMuted { color: #94a3b8; }
+    .hint { margin-top: 10px; font-size: 12px; color: #738496; line-height: 1.6; }
+    @media (max-width: 1200px) { main { grid-template-columns: minmax(0, 1fr) 380px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>IDF 分图点识别</strong>
+    <input id="pageInput" type="number" min="1" value="1" style="width:72px" />
+    <span id="pageTotal">/ 0</span>
+    <select id="zoomSelect">
+      <option value="0.75">75%</option>
+      <option value="1" selected>100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+    </select>
+  </header>
+
+  <main>
+    <section id="viewerPanel">
+      <div id="emptyState"><span>请选择 PDF 文件</span></div>
+      <div id="stage" style="display:none">
+        <canvas id="pdfCanvas"></canvas>
+        <div id="overlay">
+          <div id="splitPointBox" class="regionBox"><div class="label">分图点区域</div></div>
+          <div id="pipelineNumberBox" class="regionBox"><div class="label">管线号区域</div></div>
+          <div id="draftBox" class="regionBox"><div class="label">正在框选</div></div>
+        </div>
+      </div>
+    </section>
+
+    <aside id="sidePanel">
+      <div class="section">
+        <strong>IDF 分图点识别</strong>
+        <div class="row vertical">
+          <input id="pdfFileInput" type="file" accept="application/pdf" />
+        </div>
+      </div>
+
+      <div class="section">
+        <strong>IDF 分图点识别</strong>
+        <div class="row">
+          <button id="prevPage">上一页</button>
+          <button id="nextPage">下一页</button>
+        </div>
+        <div class="row">
+          <button id="zoomOut">缩小</button>
+          <button id="zoomIn">放大</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="row">
+          <label>当前框选</label>
+          <select id="regionType">
+            <option value="splitPoint">分图点区域</option>
+            <option value="pipelineNumber">管线号区域</option>
+          </select>
+          <button id="clearRegions">清空区域</button>
+        </div>
+        <div class="row vertical">
+          <button id="selectSplitPointRegion" class="primary">框选分图点区域</button>
+          <button id="selectPipelineRegion">框选管线号区域</button>
+        </div>
+        <div class="row">
+          <button id="exportRegionTemplate">导出识别模板</button>
+          <button id="importRegionTemplate">导入识别模板</button>
+          <input id="regionTemplateFile" type="file" accept="application/json,.json" style="display:none" />
+        </div>
+        <div class="hint">管线号只从管线号区域读取；坐标块只从分图点区域读取。两块区域分别识别，避免拼图后 MinerU 丢掉顶部管线号。</div>
+        <div id="regionInfo"></div>
+      </div>
+
+      <div class="section">
+        <strong>IDF 分图点识别</strong>
+        <div class="row vertical">
+          <button id="runCurrentPage" class="primary">识别当前页</button>
+          <button id="runAllPages">识别全部页</button>
+          <button id="stopRecognition" disabled>停止识别</button>
+        </div>
+        <div class="row">
+          <label>页码范围</label>
+          <input id="pageRangeInput" placeholder="例如 1-3,5,8" style="width:180px" />
+          <button id="runPageRange">识别选定页</button>
+        </div>
+        <div class="row vertical">
+          <button id="exportExcel" disabled>导出 Excel</button>
+          <button id="markCoordinateBoxes" disabled>OCR 标出分图点坐标块</button>
+        </div>
+        <div id="status">等待加载 PDF</div>
+        <div id="progressWrap"><div id="progress"></div></div>
+      </div>
+
+      <div class="section">
+        <strong>IDF 分图点识别</strong>
+        <div id="result"></div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/vendor/pdf.min.js"></script>
+  <script src="/vendor/pdf-lib.min.js"></script>
+  <script src="/vendor/xlsx.full.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.js';
+
+    const REGION_TYPES = {
+      splitPoint: { label: '分图点区域', boxId: 'splitPointBox' },
+      pipelineNumber: { label: '管线号区域', boxId: 'pipelineNumberBox' }
+    };
+
+    const state = {
+      pdfFile: null,
+      pdfDoc: null,
+      pageNumber: 1,
+      totalPages: 0,
+      displayScale: 1,
+      renderScale: 1.8,
+      activeRegionType: 'splitPoint',
+      regions: { splitPoint: null, pipelineNumber: null },
+      dragging: null,
+      recognizing: false,
+      ocrMarking: false
+    };
+
+    const canvas = document.getElementById('pdfCanvas');
+    const ctx = canvas.getContext('2d');
+    const recognitionCanvas = document.createElement('canvas');
+    const recognitionCtx = recognitionCanvas.getContext('2d');
+    let lastRecognitionJobs = [];
+    let recognitionController = null;
+    let ocrOverlayController = null;
+    let activeBackendRecognitionJobId = null;
+    let recognitionWakeLock = null;
+    const ocrMarkedPageOverlays = new Map();
+    let ocrUnmarkedCoordinateBlocks = [];
+    const mineruConcurrency = { active: 0, limit: 1, waiters: [] };
+    const mineruResultCache = new Map();
+    const MINERU_CACHE_STORAGE_PREFIX = 'idfMineruResultCache:v1:';
+
+    function getPdfCacheSignature() {
+      const file = state.pdfFile;
+      if (!file) return 'no-pdf';
+      return [file.name || '', file.size || 0, file.lastModified || 0].join(':');
+    }
+
+    function getRegionCacheSignature(regionType) {
+      const region = state.regions[regionType];
+      if (!region) return 'no-region';
+      return [region.x, region.y, region.width, region.height]
+        .map(value => Number(value || 0).toFixed(6))
+        .join(',');
+    }
+
+    function buildMineruCacheKey(pageNum, regionType, upload) {
+      return [
+        getPdfCacheSignature(),
+        pageNum,
+        regionType,
+        upload?.cropMode || 'single',
+        upload?.pageCount || 1,
+        getRegionCacheSignature(regionType)
+      ].join('|');
+    }
+
+    function readPersistentMineruCache(cacheKey) {
+      try {
+        const raw = localStorage.getItem(MINERU_CACHE_STORAGE_PREFIX + cacheKey);
+        if (!raw) return null;
+        const cached = JSON.parse(raw);
+        if (!cached || typeof cached.markdown !== 'string') return null;
+        mineruResultCache.set(cacheKey, cached);
+        return cached;
+      } catch (error) {
+        console.warn('读取 MinerU 本地缓存失败:', error);
+        return null;
+      }
+    }
+
+    function writePersistentMineruCache(cacheKey, result) {
+      const markdown = getMineruText(result);
+      if (!markdown) return;
+      const compact = {
+        success: true,
+        markdown,
+        tileCount: result?.tileCount || result?.pageCount || 1,
+        cachedAt: new Date().toISOString()
+      };
+      mineruResultCache.set(cacheKey, compact);
+      try {
+        localStorage.setItem(MINERU_CACHE_STORAGE_PREFIX + cacheKey, JSON.stringify(compact));
+      } catch (error) {
+        console.warn('写入 MinerU 本地缓存失败，已改用内存缓存:', error);
+      }
+    }
+
+    async function acquireMineruSlot(signal) {
+      throwIfAborted(signal);
+      if (mineruConcurrency.active < mineruConcurrency.limit) {
+        mineruConcurrency.active += 1;
+        return;
+      }
+      await new Promise((resolve, reject) => {
+        const waiter = {};
+        const abort = () => {
+          const index = mineruConcurrency.waiters.indexOf(waiter);
+          if (index >= 0) mineruConcurrency.waiters.splice(index, 1);
+          reject(new DOMException('识别已停止', 'AbortError'));
+        };
+        waiter.resolve = () => {
+          if (signal) signal.removeEventListener('abort', abort);
+          mineruConcurrency.active += 1;
+          resolve();
+        };
+        if (signal) signal.addEventListener('abort', abort, { once: true });
+        mineruConcurrency.waiters.push(waiter);
+      });
+    }
+
+    function releaseMineruSlot() {
+      mineruConcurrency.active = Math.max(0, mineruConcurrency.active - 1);
+      const next = mineruConcurrency.waiters.shift();
+      if (next) next.resolve();
+    }
+
+    const el = id => document.getElementById(id);
+    const REGION_TEMPLATE_STORAGE_KEY = 'idfMineruRegionTemplate';
+
+    function isValidTemplateRegion(region) {
+      if (!region || typeof region !== 'object') return false;
+      const values = [region.x, region.y, region.width, region.height];
+      return values.every(Number.isFinite) &&
+        region.x >= 0 && region.y >= 0 &&
+        region.width > 0 && region.height > 0 &&
+        region.x + region.width <= 1.001 &&
+        region.y + region.height <= 1.001;
+    }
+
+    function buildRegionTemplate() {
+      return {
+        type: 'idf-split-point-recognition-template',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        splitPointArea: state.regions.splitPoint,
+        pipelineArea: state.regions.pipelineNumber,
+        regions: {
+          splitPoint: state.regions.splitPoint,
+          pipelineNumber: state.regions.pipelineNumber
+        }
+      };
+    }
+
+    function persistRegionTemplate() {
+      localStorage.setItem(REGION_TEMPLATE_STORAGE_KEY, JSON.stringify(buildRegionTemplate()));
+    }
+
+    function normalizeImportedTemplate(template) {
+      const splitPoint = template?.regions?.splitPoint || template?.splitPointArea || null;
+      const pipelineNumber = template?.regions?.pipelineNumber || template?.pipelineArea || null;
+      if (!isValidTemplateRegion(splitPoint) || !isValidTemplateRegion(pipelineNumber)) {
+        throw new Error('模板缺少有效的分图点区域或管线号区域');
+      }
+      return { splitPoint, pipelineNumber };
+    }
+
+    function applyRegionTemplate(template, save = true) {
+      state.regions = normalizeImportedTemplate(template);
+      ocrMarkedPageOverlays.clear();
+      ocrUnmarkedCoordinateBlocks = [];
+      if (save) persistRegionTemplate();
+      drawRegions();
+    }
+
+    function restoreSavedRegionTemplate() {
+      const saved = localStorage.getItem(REGION_TEMPLATE_STORAGE_KEY);
+      if (!saved) return false;
+      try {
+        state.regions = normalizeImportedTemplate(JSON.parse(saved));
+        return true;
+      } catch (error) {
+        localStorage.removeItem(REGION_TEMPLATE_STORAGE_KEY);
+        return false;
+      }
+    }
+
+    function exportRegionTemplate() {
+      if (!state.regions.splitPoint || !state.regions.pipelineNumber) {
+        setStatus('请先框选分图点区域和管线号区域', 0);
+        return;
+      }
+      const blob = new Blob([JSON.stringify(buildRegionTemplate(), null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `分图点识别模板_${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      persistRegionTemplate();
+      setStatus('识别模板已导出', 100);
+    }
+
+    function setStatus(text, progress) {
+      el('status').textContent = text;
+      if (typeof progress === 'number') {
+        el('progress').style.width = `${Math.max(0, Math.min(100, progress))}%`;
+      }
+    }
+
+    async function requestRecognitionWakeLock() {
+      if (!('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+      try {
+        if (recognitionWakeLock) return;
+        recognitionWakeLock = await navigator.wakeLock.request('screen');
+        recognitionWakeLock.addEventListener('release', () => {
+          recognitionWakeLock = null;
+        });
+      } catch (error) {
+        console.warn('识别期间保持唤醒失败:', error);
+      }
+    }
+
+    async function releaseRecognitionWakeLock() {
+      const lock = recognitionWakeLock;
+      recognitionWakeLock = null;
+      if (!lock) return;
+      try {
+        await lock.release();
+      } catch (error) {
+        console.warn('释放识别唤醒锁失败:', error);
+      }
+    }
+
+    function setButtons() {
+      const ready = Boolean(state.pdfDoc);
+      const hasRegions = Boolean(state.regions.splitPoint && state.regions.pipelineNumber);
+      ['prevPage','nextPage','runCurrentPage','runAllPages','runPageRange'].forEach(id => el(id).disabled = !ready || (id.startsWith('run') && !hasRegions));
+      el('pageInput').disabled = !ready;
+      el('pageTotal').textContent = `/ ${state.totalPages || 0}`;
+      el('stopRecognition').disabled = !state.recognizing;
+      el('markCoordinateBoxes').disabled = !ready || !state.regions.splitPoint || state.ocrMarking;
+      ['runCurrentPage', 'runAllPages', 'runPageRange'].forEach(id => {
+        if (state.recognizing) el(id).disabled = true;
+      });
+      el('selectSplitPointRegion').classList.toggle('active', state.activeRegionType === 'splitPoint');
+      el('selectPipelineRegion').classList.toggle('active', state.activeRegionType === 'pipelineNumber');
+    }
+
+    function updateRegionInfo() {
+      const rows = Object.entries(REGION_TYPES).map(([type, info]) => {
+        const r = state.regions[type];
+        const text = r ? `x=${r.x.toFixed(4)}, y=${r.y.toFixed(4)}, w=${r.width.toFixed(4)}, h=${r.height.toFixed(4)}` : '未框选';
+        return `${info.label}: ${text}`;
+      });
+      el('regionInfo').textContent = rows.join('\n');
+      setButtons();
+    }
+
+    function normalizeRegion(a, b) {
+      if (!a || !b) return null;
+      return {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        width: Math.abs(a.x - b.x),
+        height: Math.abs(a.y - b.y)
+      };
+    }
+
+    function regionToPixels(region, sourceCanvas = canvas) {
+      return {
+        x: region.x * sourceCanvas.width,
+        y: region.y * sourceCanvas.height,
+        width: region.width * sourceCanvas.width,
+        height: region.height * sourceCanvas.height
+      };
+    }
+
+    function regionToPixelSize(region, width, height) {
+      return {
+        x: region.x * width,
+        y: region.y * height,
+        width: region.width * width,
+        height: region.height * height
+      };
+    }
+
+    function setBox(box, region) {
+      if (!region || region.width <= 0 || region.height <= 0) {
+        box.style.display = 'none';
+        return;
+      }
+      const p = regionToPixels(region, canvas);
+      box.style.display = 'block';
+      box.style.left = `${p.x}px`;
+      box.style.top = `${p.y}px`;
+      box.style.width = `${p.width}px`;
+      box.style.height = `${p.height}px`;
+    }
+
+    function clearCoordinateOverlays() {
+      el('overlay').querySelectorAll('.coordOverlayBox').forEach(node => node.remove());
+    }
+
+    function coordinateOverlayRecordKey(record) {
+      return `${Number(record?.rowIndex) || 0}:${Number.isInteger(record?.targetIndex) ? record.targetIndex : 0}`;
+    }
+
+    function createCoordinateOverlayMarker(record, width = canvas.width, height = canvas.height) {
+      const marker = document.createElement('div');
+      marker.className = `coordOverlayBox ocr${record.inferred ? ' inferred' : ''}`;
+      marker.style.left = `${record.x * width}px`;
+      marker.style.top = `${record.y * height}px`;
+      marker.style.width = `${record.width * width}px`;
+      marker.style.height = `${record.height * height}px`;
+      const suffix = Number.isInteger(record.targetIndex) && record.targetTotal > 1 ? `-${record.targetIndex + 1}` : '';
+      marker.innerHTML = `<div class="label">分图点 ${record.rowIndex + 1}${suffix}</div>`;
+      return marker;
+    }
+
+    function drawCachedOcrCoordinateOverlays(pageNumber = state.pageNumber) {
+      const records = ocrMarkedPageOverlays.get(Number(pageNumber)) || [];
+      records.forEach(record => {
+        el('overlay').appendChild(createCoordinateOverlayMarker(record));
+      });
+      return records;
+    }
+
+    function normalizeCoordSearchText(value) {
+      return String(value || '')
+        .normalize('NFKC')
+        .toUpperCase()
+        .replace(/\s+/g, '')
+        .replace(/[：:]/g, '')
+        .trim();
+    }
+
+    function numericSearchValue(value) {
+      return normalizeCoordSearchText(value).replace(/^\+/, '');
+    }
+
+    function isCoordLineMatch(lineText, label, value) {
+      const text = normalizeCoordSearchText(lineText);
+      const rawValue = normalizeCoordSearchText(value);
+      const noPlusValue = numericSearchValue(value);
+      if (!text || !noPlusValue) return false;
+      if (label === 'EL') {
+        return text.includes(`EL${rawValue}`) ||
+          text.includes(`EL+${noPlusValue}`) ||
+          text.includes(`EL${noPlusValue}`);
+      }
+      return text.includes(`${label}${noPlusValue}`) ||
+        (text.startsWith(label) && text.includes(noPlusValue));
+    }
+
+    function rectsOverlap(a, b) {
+      if (!a || !b) return false;
+      return a.x + a.width >= b.x &&
+        a.x <= b.x + b.width &&
+        a.y + a.height >= b.y &&
+        a.y <= b.y + b.height;
+    }
+
+    function buildTextLinesFromContent(textContent, viewport) {
+      const items = (textContent?.items || [])
+        .map(item => {
+          const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+          const text = String(item.str || '').trim();
+          if (!text) return null;
+          const width = Math.max(1, Math.abs(item.width || 0) * viewport.scale);
+          const height = Math.max(6, Math.abs(item.height || Math.hypot(tx[2] || 0, tx[3] || 0) || 8) * viewport.scale);
+          return {
+            text,
+            x: tx[4],
+            y: tx[5] - height,
+            width,
+            height,
+            centerY: tx[5] - height / 2
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.centerY - b.centerY || a.x - b.x);
+
+      const lines = [];
+      items.forEach(item => {
+        let line = lines.find(current => Math.abs(current.centerY - item.centerY) <= Math.max(4, item.height * 0.7));
+        if (!line) {
+          line = { items: [], centerY: item.centerY };
+          lines.push(line);
+        }
+        line.items.push(item);
+        line.centerY = line.items.reduce((sum, current) => sum + current.centerY, 0) / line.items.length;
+      });
+
+      return lines.map(line => {
+        const sorted = line.items.sort((a, b) => a.x - b.x);
+        const minX = Math.min(...sorted.map(item => item.x));
+        const minY = Math.min(...sorted.map(item => item.y));
+        const maxX = Math.max(...sorted.map(item => item.x + item.width));
+        const maxY = Math.max(...sorted.map(item => item.y + item.height));
+        return {
+          text: sorted.map(item => item.text).join(' '),
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY,
+          centerX: (minX + maxX) / 2,
+          centerY: (minY + maxY) / 2
+        };
+      }).sort((a, b) => a.centerY - b.centerY || a.x - b.x);
+    }
+
+    function findCoordinateBlockRect(block, lines, splitRegionPixels) {
+      const candidateLines = lines.filter(line => rectsOverlap(line, splitRegionPixels));
+      for (let i = 0; i < candidateLines.length; i += 1) {
+        const eLine = candidateLines[i];
+        if (!isCoordLineMatch(eLine.text, 'E', block.e)) continue;
+
+        for (let j = i + 1; j < Math.min(candidateLines.length, i + 5); j += 1) {
+          const sLine = candidateLines[j];
+          if (sLine.centerY - eLine.centerY > 90) break;
+          if (Math.abs(sLine.centerX - eLine.centerX) > 180) continue;
+          if (!isCoordLineMatch(sLine.text, 'S', block.s)) continue;
+
+          for (let k = j + 1; k < Math.min(candidateLines.length, j + 5); k += 1) {
+            const elLine = candidateLines[k];
+            if (elLine.centerY - sLine.centerY > 90) break;
+            if (Math.abs(elLine.centerX - eLine.centerX) > 190) continue;
+            if (!isCoordLineMatch(elLine.text, 'EL', block.el)) continue;
+            const minX = Math.min(eLine.x, sLine.x, elLine.x) - 5;
+            const minY = Math.min(eLine.y, sLine.y, elLine.y) - 4;
+            const maxX = Math.max(eLine.x + eLine.width, sLine.x + sLine.width, elLine.x + elLine.width) + 5;
+            const maxY = Math.max(eLine.y + eLine.height, sLine.y + sLine.height, elLine.y + elLine.height) + 4;
+            return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+          }
+        }
+      }
+      return null;
+    }
+
+    function rowPagesInclude(row, pageNumber) {
+      return String(row?.pages || '')
+        .split(/[^0-9]+/)
+        .filter(Boolean)
+        .some(value => Number(value) === Number(pageNumber));
+    }
+
+    function normalizeRowCoordinateTargets(row) {
+      const blocks = Array.isArray(row?.coordinateBlocks)
+        ? row.coordinateBlocks.filter(block => block && (block.e || block.s || block.el))
+        : [];
+      return blocks.length ? blocks : [row];
+    }
+
+    function sameCoordinateBlock(block, target) {
+      return normalizeCoordinateNumber(block?.e) === normalizeCoordinateNumber(target?.e)
+        && normalizeCoordinateNumber(block?.s) === normalizeCoordinateNumber(target?.s)
+        && normalizeCoordinateNumber(block?.el) === normalizeCoordinateNumber(target?.el);
+    }
+
+    function getSplitPointBlocksForJob(job) {
+      if (!job || !Array.isArray(job.coordinateBlocks)) return [];
+      const rows = analyzeSplitPoints(lastRecognitionJobs).repeated || [];
+      const matched = [];
+      rows.forEach((row, rowIndex) => {
+        if (!rowPagesInclude(row, job.page)) return;
+        if (row.pipeline && job.pipelineNumber && row.pipeline !== job.pipelineNumber) return;
+        const targets = normalizeRowCoordinateTargets(row);
+        targets.forEach((target, targetIndex) => {
+          if (target.page && Number(target.page) !== Number(job.page)) return;
+          const block = job.coordinateBlocks.find(item => sameCoordinateBlock(item, target));
+          if (!block) return;
+          matched.push({ block, row, rowIndex, targetIndex, targetTotal: targets.length });
+        });
+      });
+      return matched;
+    }
+
+    async function drawCoordinateOverlaysForPage(page, viewport) {
+      clearCoordinateOverlays();
+      const cachedRecords = drawCachedOcrCoordinateOverlays(state.pageNumber);
+      const cachedKeys = new Set(cachedRecords.map(coordinateOverlayRecordKey));
+      const job = lastRecognitionJobs.find(item => item.page === state.pageNumber);
+      if (!job || !Array.isArray(job.coordinateBlocks) || job.coordinateBlocks.length === 0 || !state.regions.splitPoint) return;
+      const splitPointBlocks = getSplitPointBlocksForJob(job);
+      if (!splitPointBlocks.length) return;
+
+      try {
+        const splitRegionPixels = regionToPixels(state.regions.splitPoint, canvas);
+        const textContent = await page.getTextContent();
+        const lines = buildTextLinesFromContent(textContent, viewport);
+        splitPointBlocks.forEach(({ block, row, rowIndex, targetIndex, targetTotal }) => {
+          if (cachedKeys.has(coordinateOverlayRecordKey({ rowIndex, targetIndex }))) return;
+          const rect = findCoordinateBlockRect(block, lines, splitRegionPixels);
+          if (!rect) return;
+          const marker = document.createElement('div');
+          marker.className = `coordOverlayBox${block.inferred || row.elDifference ? ' inferred' : ''}`;
+          marker.style.left = `${rect.x}px`;
+          marker.style.top = `${rect.y}px`;
+          marker.style.width = `${rect.width}px`;
+          marker.style.height = `${rect.height}px`;
+          const suffix = Number.isInteger(targetIndex) && targetTotal > 1 ? `-${targetIndex + 1}` : '';
+          marker.innerHTML = `<div class="label">分图点 ${rowIndex + 1}${suffix}</div>`;
+          el('overlay').appendChild(marker);
+        });
+      } catch (error) {
+        console.warn('绘制坐标块框失败:', error);
+      }
+    }
+
+    function getDetectionPoints(detection) {
+      const box = detection?.box || detection?.bbox || detection?.polygon || detection?.points;
+      if (!Array.isArray(box)) return [];
+      if (box.length === 4 && box.every(value => typeof value === 'number')) {
+        const [x, y, width, height] = box;
+        return [[x, y], [x + width, y], [x + width, y + height], [x, y + height]];
+      }
+      return box
+        .map(point => {
+          if (Array.isArray(point)) return [Number(point[0]), Number(point[1])];
+          if (point && typeof point === 'object') return [Number(point.x), Number(point.y)];
+          return null;
+        })
+        .filter(point => point && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+    }
+
+    function getDetectionText(detection) {
+      return String(
+        detection?.text
+        ?? detection?.content
+        ?? detection?.value
+        ?? detection?.label
+        ?? detection?.recognized_text
+        ?? detection?.ocr_text
+        ?? detection?.rec_text
+        ?? detection?.transcription
+        ?? ''
+      ).trim();
+    }
+
+    function detectionToSplitRegionBox(detection, pageInfo, splitRegionPixels) {
+      const points = getDetectionPoints(detection);
+      if (points.length < 2) return null;
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+      const maxX = Math.max(...xs);
+      const maxY = Math.max(...ys);
+      const maxValue = Math.max(...xs.map(Math.abs), ...ys.map(Math.abs));
+      const isRelative = pageInfo.coordinate_format === 'relative' || maxValue <= 1.5;
+      const pageWidth = Number(pageInfo.page_width) || 1;
+      const pageHeight = Number(pageInfo.page_height) || 1;
+      const left = splitRegionPixels.x + (isRelative ? minX * splitRegionPixels.width : minX / pageWidth * splitRegionPixels.width);
+      const top = splitRegionPixels.y + (isRelative ? minY * splitRegionPixels.height : minY / pageHeight * splitRegionPixels.height);
+      const right = splitRegionPixels.x + (isRelative ? maxX * splitRegionPixels.width : maxX / pageWidth * splitRegionPixels.width);
+      const bottom = splitRegionPixels.y + (isRelative ? maxY * splitRegionPixels.height : maxY / pageHeight * splitRegionPixels.height);
+      const rect = { x: left, y: top, width: right - left, height: bottom - top, text: getDetectionText(detection) };
+      if (rect.width < 4 || rect.height < 4) return null;
+      return rect;
+    }
+
+    function coordinateTextMatchesValue(text, value) {
+      const target = normalizeCoordinateNumber(value);
+      if (!target) return false;
+      const rawText = String(text || '');
+      const normalizedWhole = normalizeCoordinateNumber(rawText);
+      if (normalizedWhole === target) return true;
+      const numbers = rawText.match(/[+-]?\d+(?:\.\d+)?/g) || [];
+      return numbers.some(number => normalizeCoordinateNumber(number) === target);
+    }
+
+    function normalizedBoxText(text) {
+      return String(text || '')
+        .normalize('NFKC')
+        .toUpperCase()
+        .replace(/\s+/g, '')
+        .replace(/[：:]/g, '')
+        .trim();
+    }
+
+    function coordinateLabelMatches(text, label) {
+      return normalizedBoxText(text) === label;
+    }
+
+    function boxCenterY(rect) {
+      return rect.y + rect.height / 2;
+    }
+
+    function boxCenterX(rect) {
+      return rect.x + rect.width / 2;
+    }
+
+    function findLabelForValueBox(boxes, label, valueBox) {
+      const maxYDistance = Math.max(18, valueBox.height * 1.8);
+      const maxXDistance = Math.max(70, valueBox.width * 2.2);
+      return boxes
+        .filter(box => coordinateLabelMatches(box.text, label))
+        .filter(box => Math.abs(boxCenterY(box) - boxCenterY(valueBox)) <= maxYDistance)
+        .filter(box => box.x <= valueBox.x + valueBox.width && Math.abs(valueBox.x - box.x) <= maxXDistance)
+        .sort((a, b) => Math.abs(valueBox.x - a.x) - Math.abs(valueBox.x - b.x))[0] || null;
+    }
+
+    function findLooseEValueBox(boxes, eLabelBox) {
+      const maxYDistance = Math.max(18, eLabelBox.height * 1.8);
+      const maxXDistance = 90;
+      return boxes
+        .filter(box => box !== eLabelBox)
+        .filter(box => /^[+-]?\d{4,7}$/.test(normalizedBoxText(box.text)))
+        .filter(box => Math.abs(boxCenterY(box) - boxCenterY(eLabelBox)) <= maxYDistance)
+        .filter(box => box.x >= eLabelBox.x && box.x - eLabelBox.x <= maxXDistance)
+        .sort((a, b) => (a.x - eLabelBox.x) - (b.x - eLabelBox.x))[0] || null;
+    }
+
+    function getMatchedCoordinateKeys(text, block) {
+      return ['e', 's', 'el'].filter(key => coordinateTextMatchesValue(text, block?.[key]));
+    }
+
+    function rectCenter(rect) {
+      return {
+        x: rect.x + rect.width / 2,
+        y: rect.y + rect.height / 2
+      };
+    }
+
+    function buildRawUnionRect(rects) {
+      const minX = Math.min(...rects.map(rect => rect.x));
+      const minY = Math.min(...rects.map(rect => rect.y));
+      const maxX = Math.max(...rects.map(rect => rect.x + rect.width));
+      const maxY = Math.max(...rects.map(rect => rect.y + rect.height));
+      return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+
+    function isCompactCoordinateTriplet(rects, bounds) {
+      if (rects.length !== 3 || new Set(rects).size !== 3) return false;
+      const union = buildRawUnionRect(rects);
+      const avgHeight = rects.reduce((sum, rect) => sum + rect.height, 0) / rects.length;
+      const avgWidth = rects.reduce((sum, rect) => sum + rect.width, 0) / rects.length;
+      const maxWidth = Math.max(avgWidth * 5, 90, bounds.width * 0.16);
+      const maxHeight = Math.max(avgHeight * 8, 80, bounds.height * 0.12);
+      if (union.width > maxWidth || union.height > maxHeight) return false;
+
+      const centers = rects.map(rectCenter);
+      const maxCenterDistance = Math.max(
+        ...centers.flatMap((a, index) => centers.slice(index + 1).map(b => Math.hypot(a.x - b.x, a.y - b.y)))
+      );
+      const maxAllowedDistance = Math.hypot(maxWidth, maxHeight);
+      return maxCenterDistance <= maxAllowedDistance;
+    }
+
+    function isCompactCoordinateGroup(rects, bounds) {
+      const uniqueRects = Array.from(new Set(rects.filter(Boolean)));
+      if (uniqueRects.length < 4) return false;
+      const union = buildRawUnionRect(uniqueRects);
+      const avgHeight = uniqueRects.reduce((sum, rect) => sum + rect.height, 0) / uniqueRects.length;
+      const maxWidth = Math.max(120, bounds.width * 0.22);
+      const maxHeight = Math.max(avgHeight * 9, 90, bounds.height * 0.14);
+      return union.width <= maxWidth && union.height <= maxHeight;
+    }
+
+    function isCompactCoordinateValueGroup(rects, bounds) {
+      const uniqueRects = Array.from(new Set(rects.filter(Boolean)));
+      if (uniqueRects.length !== 3) return false;
+      const [eBox, sBox, elBox] = uniqueRects;
+      if (!(boxCenterY(eBox) < boxCenterY(sBox) && boxCenterY(sBox) < boxCenterY(elBox))) return false;
+      const union = buildRawUnionRect(uniqueRects);
+      const avgHeight = uniqueRects.reduce((sum, rect) => sum + rect.height, 0) / uniqueRects.length;
+      const avgWidth = uniqueRects.reduce((sum, rect) => sum + rect.width, 0) / uniqueRects.length;
+      const maxWidth = Math.max(avgWidth * 4.5, 90, bounds.width * 0.14);
+      const maxHeight = Math.max(avgHeight * 7, 72, bounds.height * 0.1);
+      return union.width <= maxWidth && union.height <= maxHeight;
+    }
+
+    function findBestNumericOnlyCoordinateTriplet(boxes, block, bounds) {
+      const eValueBoxes = boxes.filter(box => coordinateTextMatchesValue(box.text, block?.e));
+      const sValueBoxes = boxes.filter(box => coordinateTextMatchesValue(box.text, block?.s));
+      const elValueBoxes = boxes
+        .filter(box => coordinateTextMatchesValue(box.text, block?.el))
+        .filter(box => /^\+/.test(normalizedBoxText(box.text)));
+      if (!eValueBoxes.length || !sValueBoxes.length || !elValueBoxes.length) return null;
+
+      let best = null;
+      eValueBoxes.forEach(eBox => {
+        sValueBoxes.forEach(sBox => {
+          elValueBoxes.forEach(elBox => {
+            const rects = [eBox, sBox, elBox];
+            if (!isCompactCoordinateValueGroup(rects, bounds)) return;
+            const union = buildRawUnionRect(rects);
+            const area = union.width * union.height;
+            if (!best || area < best.area) {
+              best = { rects, union, area, numericOnly: true };
+            }
+          });
+        });
+      });
+      return best;
+    }
+
+    function findBestCoordinateTripletFallback(boxes, block, bounds) {
+      const sValueBoxes = boxes.filter(box => coordinateTextMatchesValue(box.text, block?.s));
+      const elValueBoxes = boxes.filter(box => coordinateTextMatchesValue(box.text, block?.el));
+      if (!sValueBoxes.length || !elValueBoxes.length) return null;
+
+      let best = null;
+      sValueBoxes.forEach(sValueBox => {
+        const sLabelBox = findLabelForValueBox(boxes, 'S', sValueBox);
+        if (!sLabelBox) return;
+        elValueBoxes.forEach(elValueBox => {
+          const elLabelBox = findLabelForValueBox(boxes, 'EL', elValueBox);
+          if (!elLabelBox) return;
+          if (boxCenterY(elLabelBox) < boxCenterY(sLabelBox)) return;
+          if (Math.abs(boxCenterX(elLabelBox) - boxCenterX(sLabelBox)) > Math.max(70, sValueBox.width * 2.5)) return;
+
+          const eLabelBox = boxes
+            .filter(box => coordinateLabelMatches(box.text, 'E'))
+            .filter(box => boxCenterY(box) < boxCenterY(sLabelBox))
+            .filter(box => boxCenterY(sLabelBox) - boxCenterY(box) <= Math.max(32, sValueBox.height * 3.2))
+            .filter(box => Math.abs(boxCenterX(box) - boxCenterX(sLabelBox)) <= Math.max(70, sValueBox.width * 2.5))
+            .sort((a, b) => Math.abs(boxCenterY(sLabelBox) - boxCenterY(a)) - Math.abs(boxCenterY(sLabelBox) - boxCenterY(b)))[0] || null;
+          if (!eLabelBox) return;
+          const eValueBox = findLooseEValueBox(boxes, eLabelBox);
+          const rects = [eLabelBox, eValueBox, sLabelBox, sValueBox, elLabelBox, elValueBox].filter(Boolean);
+          if (!isCompactCoordinateGroup(rects, bounds)) return;
+          const union = buildRawUnionRect(rects);
+          const area = union.width * union.height;
+          if (!best || area < best.area) {
+            best = { rects, union, area, fallback: true };
+          }
+        });
+      });
+      return best || findBestNumericOnlyCoordinateTriplet(boxes, block, bounds);
+    }
+
+    function findBestCoordinateTriplet(boxes, block, bounds) {
+      const candidatesByKey = { e: [], s: [], el: [] };
+      boxes.forEach(box => {
+        ['e', 's', 'el'].forEach(key => {
+          if (coordinateTextMatchesValue(box.text, block?.[key])) {
+            candidatesByKey[key].push(box);
+          }
+        });
+      });
+      if (!candidatesByKey.e.length || !candidatesByKey.s.length || !candidatesByKey.el.length) {
+        return findBestCoordinateTripletFallback(boxes, block, bounds);
+      }
+
+      let best = null;
+      candidatesByKey.e.forEach(eBox => {
+        candidatesByKey.s.forEach(sBox => {
+          candidatesByKey.el.forEach(elBox => {
+            const rects = [eBox, sBox, elBox];
+            if (!isCompactCoordinateTriplet(rects, bounds)) return;
+            const union = buildRawUnionRect(rects);
+            const area = union.width * union.height;
+            if (!best || area < best.area) {
+              best = { rects, union, area };
+            }
+          });
+        });
+      });
+      return best || findBestCoordinateTripletFallback(boxes, block, bounds);
+    }
+
+    function buildPaddedUnionRect(rects, bounds, padding = 6) {
+      const minX = Math.min(...rects.map(rect => rect.x)) - padding;
+      const minY = Math.min(...rects.map(rect => rect.y)) - padding;
+      const maxX = Math.max(...rects.map(rect => rect.x + rect.width)) + padding;
+      const maxY = Math.max(...rects.map(rect => rect.y + rect.height)) + padding;
+      const left = Math.max(bounds.x, minX);
+      const top = Math.max(bounds.y, minY);
+      const right = Math.min(bounds.x + bounds.width, maxX);
+      const bottom = Math.min(bounds.y + bounds.height, maxY);
+      return { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+    }
+
+    function drawOcrTextBoxesInSplitRegion(detections, pageInfo = {}, options = {}) {
+      const pageNumber = Number(options.pageNumber || state.pageNumber);
+      const renderWidth = Number(options.renderWidth || canvas.width);
+      const renderHeight = Number(options.renderHeight || canvas.height);
+      const shouldDraw = options.draw !== false && pageNumber === Number(state.pageNumber);
+      if (shouldDraw) clearCoordinateOverlays();
+      const job = lastRecognitionJobs.find(item => Number(item.page) === pageNumber);
+      const splitPointBlocks = getSplitPointBlocksForJob(job);
+      if (!splitPointBlocks.length) {
+        return { markedCount: 0, targetCount: 0, textBoxCount: 0, overlays: [], reason: 'noSplitPointBlocks' };
+      }
+      const splitRegionPixels = regionToPixelSize(state.regions.splitPoint, renderWidth, renderHeight);
+      const boxes = (detections || [])
+        .map(detection => detectionToSplitRegionBox(detection, pageInfo, splitRegionPixels))
+        .filter(Boolean);
+
+      let markedCount = 0;
+      const overlays = [];
+      const unmarked = [];
+      splitPointBlocks.forEach(({ block, row, rowIndex, targetIndex, targetTotal }) => {
+        const triplet = findBestCoordinateTriplet(boxes, block, splitRegionPixels);
+        if (!triplet) {
+          unmarked.push({
+            page: pageNumber,
+            pipeline: row?.pipeline || job?.pipelineNumber || '',
+            rowIndex,
+            targetIndex,
+            block,
+            reason: 'OCR文字框未能组成坐标块'
+          });
+          return;
+        }
+        const rect = buildPaddedUnionRect(triplet.rects, splitRegionPixels);
+        if (rect.width < 4 || rect.height < 4) {
+          unmarked.push({
+            page: pageNumber,
+            pipeline: row?.pipeline || job?.pipelineNumber || '',
+            rowIndex,
+            targetIndex,
+            block,
+            reason: '坐标块框尺寸过小'
+          });
+          return;
+        }
+        const record = {
+          x: rect.x / renderWidth,
+          y: rect.y / renderHeight,
+          width: rect.width / renderWidth,
+          height: rect.height / renderHeight,
+          rowIndex,
+          targetIndex,
+          targetTotal,
+          inferred: Boolean(block.inferred || row.elDifference)
+        };
+        overlays.push(record);
+        if (shouldDraw) {
+          el('overlay').appendChild(createCoordinateOverlayMarker(record, renderWidth, renderHeight));
+        }
+        markedCount += 1;
+      });
+      return { markedCount, targetCount: splitPointBlocks.length, textBoxCount: boxes.length, overlays, unmarked };
+    }
+
+    function hasMeaningfulDetectionText(detections) {
+      return (detections || []).some(item => getDetectionText(item));
+    }
+
+    async function readBatchUploadTextDetectionResponse(response, currentPage) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let detections = [];
+      let pageInfo = { page_width: 0, page_height: 0, page_index: currentPage };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || !line.startsWith('data: ')) continue;
+          let data = null;
+          try {
+            data = JSON.parse(line.slice(6));
+          } catch (error) {
+            continue;
+          }
+          if (data.type === 'error') {
+            throw new Error(data.message || 'OCR batch-upload 识别失败');
+          }
+          if (data.type !== 'result') continue;
+
+          const rows = Array.isArray(data.logical_rows) ? data.logical_rows : [];
+          const pageData = rows.length === 1 ? rows[0] : (rows[currentPage - 1] || rows[0]);
+          if (!pageData) continue;
+          if (Array.isArray(pageData.detections)) {
+            detections = pageData.detections;
+          }
+          if (pageData.page_info) {
+            pageInfo = {
+              page_width: pageData.page_info.page_width || 0,
+              page_height: pageData.page_info.page_height || 0,
+              page_index: currentPage
+            };
+          }
+          if (detections.length) return { detections, page_info: pageInfo, source: 'batch-upload' };
+        }
+      }
+
+      return { detections, page_info: pageInfo, source: 'batch-upload' };
+    }
+
+    async function requestOcrDetectionsForCoordinateMarking(pdfBlob, signal, pageNumber = state.pageNumber) {
+      const detectFormData = new FormData();
+      detectFormData.append('pdf_file', pdfBlob, `split_point_page_${pageNumber}.pdf`);
+      detectFormData.append('page_index', '1');
+      detectFormData.append('coordinate_format', 'relative');
+
+      const detectResponse = await fetch('/ocr/api/recognize/detect-text-upload', {
+        method: 'POST',
+        body: detectFormData,
+        signal
+      });
+      if (!detectResponse.ok && detectResponse.status !== 404) {
+        const text = await detectResponse.text();
+        throw new Error(`OCR 标框失败: ${detectResponse.status} ${text}`);
+      }
+      if (detectResponse.ok) {
+        const detectResult = await detectResponse.json();
+        if (hasMeaningfulDetectionText(detectResult.detections || [])) {
+          return { ...detectResult, source: 'detect-text-upload' };
+        }
+      }
+
+      const template = {
+        materialArea: { x: 0, y: 0, width: 1, height: 1, _isTextDetection: true },
+        start_page: 1,
+        end_page: 1,
+        page_range: [1],
+        text_detection_only: true,
+        skip_table_structure: true,
+        skip_material_parsing: true,
+        coordinate_format: 'relative'
+      };
+      const batchFormData = new FormData();
+      batchFormData.append('pdf_file', pdfBlob, `split_point_page_${pageNumber}.pdf`);
+      batchFormData.append('template', JSON.stringify(template));
+      batchFormData.append('mode', 'text_detection');
+
+      const batchResponse = await fetch('/ocr/api/recognize/batch-upload', {
+        method: 'POST',
+        body: batchFormData,
+        signal
+      });
+      if (!batchResponse.ok) {
+        const text = await batchResponse.text();
+        throw new Error(`OCR batch-upload 标框失败: ${batchResponse.status} ${text}`);
+      }
+      return await readBatchUploadTextDetectionResponse(batchResponse, 1);
+    }
+
+    async function markCoordinateBoxesWithOcr() {
+      if (state.ocrMarking) return;
+      if (!state.pdfDoc) throw new Error('请先加载 PDF');
+      if (!state.regions.splitPoint) throw new Error('请先框选分图点区域');
+      const targetJobs = lastRecognitionJobs
+        .filter(job => getSplitPointBlocksForJob(job).length > 0)
+        .sort((a, b) => Number(a.page) - Number(b.page));
+      if (!targetJobs.length) throw new Error('没有已识别出的分图点页面，请先完成分图点识别');
+      ocrOverlayController = new AbortController();
+      const timeoutId = setTimeout(() => ocrOverlayController.abort(), Math.max(120000, targetJobs.length * 120000));
+      state.ocrMarking = true;
+      setButtons();
+      try {
+        ocrMarkedPageOverlays.clear();
+        ocrUnmarkedCoordinateBlocks = [];
+        clearCoordinateOverlays();
+        let totalMarked = 0;
+        let totalTarget = 0;
+        for (let index = 0; index < targetJobs.length; index += 1) {
+          const currentJob = targetJobs[index];
+          const pageNumber = Number(currentJob.page);
+          const progress = Math.round(index / targetJobs.length * 100);
+          setStatus(`正在用 OCR 标出分图点坐标块 ${index + 1}/${targetJobs.length}: 第 ${pageNumber} 页`, progress);
+          const sourceCanvas = await prepareRecognitionCanvas(pageNumber);
+          const splitCanvas = cropRegionToCanvas(state.regions.splitPoint, sourceCanvas);
+          const pdfBlob = await canvasToSinglePagePdfBlob(splitCanvas);
+          const page = await state.pdfDoc.getPage(pageNumber);
+          const viewport = page.getViewport({ scale: state.renderScale * state.displayScale });
+          const result = await requestOcrDetectionsForCoordinateMarking(pdfBlob, ocrOverlayController.signal, pageNumber);
+          const stats = drawOcrTextBoxesInSplitRegion(result.detections || [], result.page_info || {}, {
+            pageNumber,
+            renderWidth: viewport.width,
+            renderHeight: viewport.height,
+            draw: pageNumber === Number(state.pageNumber)
+          });
+          ocrMarkedPageOverlays.set(pageNumber, stats.overlays || []);
+          ocrUnmarkedCoordinateBlocks.push(...(stats.unmarked || []));
+          totalMarked += stats.markedCount || 0;
+          totalTarget += stats.targetCount || 0;
+          writeRecognitionDebugLog({
+            reason: 'ocr-coordinate-box-marking',
+            ocrSource: result.source || '',
+            page: pageNumber,
+            sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+            pipelineNumber: currentJob?.pipelineNumber || '',
+            targetSplitPointBlocks: getSplitPointBlocksForJob(currentJob),
+            ocrDetectionCount: (result.detections || []).length,
+            ocrDetections: (result.detections || []).map(item => ({
+              text: getDetectionText(item),
+              bbox: item.bbox || item.box || item.points || null,
+              confidence: item.confidence ?? item.score ?? null
+            })),
+            pageInfo: result.page_info || {},
+            markStats: stats
+          });
+        }
+        renderResult(lastRecognitionJobs);
+        const missingSuffix = ocrUnmarkedCoordinateBlocks.length
+          ? `；有 ${ocrUnmarkedCoordinateBlocks.length} 个坐标块未能标出，已在右侧声明`
+          : '';
+        setStatus(`OCR 标框完成：已处理 ${targetJobs.length} 页，标出 ${totalMarked}/${totalTarget} 个分图点坐标块${missingSuffix}`, 100);
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          setStatus('OCR 标框已取消或超时，分图点结果仍可导出', 0);
+          return;
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+        state.ocrMarking = false;
+        ocrOverlayController = null;
+        setButtons();
+      }
+    }
+
+    async function refreshCoordinateOverlaysForCurrentPage() {
+      if (!state.pdfDoc) return;
+      const page = await state.pdfDoc.getPage(state.pageNumber);
+      const viewport = page.getViewport({ scale: state.renderScale * state.displayScale });
+      await drawCoordinateOverlaysForPage(page, viewport);
+    }
+
+    function drawRegions() {
+      clearCoordinateOverlays();
+      setBox(el('splitPointBox'), state.regions.splitPoint);
+      setBox(el('pipelineNumberBox'), state.regions.pipelineNumber);
+      setBox(el('draftBox'), state.dragging ? normalizeRegion(state.dragging.start, state.dragging.current) : null);
+      updateRegionInfo();
+    }
+
+    async function renderPage() {
+      if (!state.pdfDoc) return;
+      setStatus('正在渲染 PDF 页面...', 0);
+      const page = await state.pdfDoc.getPage(state.pageNumber);
+      const viewport = page.getViewport({ scale: state.renderScale * state.displayScale });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const stage = el('stage');
+      stage.style.width = `${viewport.width}px`;
+      stage.style.height = `${viewport.height}px`;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      el('pageInput').value = state.pageNumber;
+      setStatus('页面已渲染', 100);
+      drawRegions();
+      await drawCoordinateOverlaysForPage(page, viewport);
+    }
+
+    async function prepareRecognitionCanvas(pageNum) {
+      const page = await state.pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.6 });
+      const pageCanvas = document.createElement('canvas');
+      pageCanvas.width = viewport.width;
+      pageCanvas.height = viewport.height;
+      const pageContext = pageCanvas.getContext('2d');
+      pageContext.fillStyle = '#fff';
+      pageContext.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+      await page.render({ canvasContext: pageContext, viewport }).promise;
+      return pageCanvas;
+    }
+
+    async function loadPdf(file) {
+      state.pdfFile = file;
+      state.pdfDoc = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+      state.totalPages = state.pdfDoc.numPages;
+      state.pageNumber = 1;
+      if (!restoreSavedRegionTemplate()) {
+        state.regions = { splitPoint: null, pipelineNumber: null };
+      }
+      lastRecognitionJobs = [];
+      ocrMarkedPageOverlays.clear();
+      ocrUnmarkedCoordinateBlocks = [];
+      state.ocrMarking = false;
+      el('emptyState').style.display = 'none';
+      el('stage').style.display = 'block';
+      el('result').textContent = '';
+      el('exportExcel').disabled = true;
+      await renderPage();
+    }
+
+    function cropRegionToCanvas(region, sourceCanvas) {
+      if (!region) throw new Error('请先框选区域');
+      const p = regionToPixels(region, sourceCanvas);
+      const sx = Math.max(0, Math.round(p.x));
+      const sy = Math.max(0, Math.round(p.y));
+      const sw = Math.max(1, Math.min(sourceCanvas.width - sx, Math.round(p.width)));
+      const sh = Math.max(1, Math.min(sourceCanvas.height - sy, Math.round(p.height)));
+      const c = document.createElement('canvas');
+      c.width = sw;
+      c.height = sh;
+      const cctx = c.getContext('2d');
+      cctx.fillStyle = '#fff';
+      cctx.fillRect(0, 0, sw, sh);
+      cctx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+      return c;
+    }
+
+    function normalizeRegionForMineru(sourceCanvas, options = {}) {
+      const { minWidth = 0, minHeight = 0, maxScale = 4, padding = 18 } = options;
+      const scale = Math.min(maxScale, Math.max(1, minWidth ? minWidth / sourceCanvas.width : 1, minHeight ? minHeight / sourceCanvas.height : 1));
+      const w = Math.round(sourceCanvas.width * scale);
+      const h = Math.round(sourceCanvas.height * scale);
+      const c = document.createElement('canvas');
+      c.width = w + padding * 2;
+      c.height = h + padding * 2;
+      const cctx = c.getContext('2d');
+      cctx.fillStyle = '#fff';
+      cctx.fillRect(0, 0, c.width, c.height);
+      cctx.imageSmoothingEnabled = true;
+      cctx.imageSmoothingQuality = 'high';
+      cctx.drawImage(sourceCanvas, padding, padding, w, h);
+      return c;
+    }
+
+    function drawLabeledRegion(targetCtx, title, cropCanvas, x, y, width, color) {
+      const labelHeight = 34;
+      targetCtx.fillStyle = '#fff';
+      targetCtx.fillRect(x, y, width, labelHeight + cropCanvas.height);
+      targetCtx.strokeStyle = color;
+      targetCtx.lineWidth = 2;
+      targetCtx.strokeRect(x + 1, y + 1, width - 2, labelHeight + cropCanvas.height - 2);
+      targetCtx.fillStyle = color;
+      targetCtx.fillRect(x, y, width, labelHeight);
+      targetCtx.fillStyle = '#fff';
+      targetCtx.font = 'bold 16px Arial, sans-serif';
+      targetCtx.textBaseline = 'middle';
+      targetCtx.fillText(title, x + 12, y + labelHeight / 2);
+      targetCtx.drawImage(cropCanvas, x, y + labelHeight);
+    }
+
+    function buildCombinedPreviewCanvas(sourceCanvas) {
+      const pipelineCanvas = normalizeRegionForMineru(cropRegionToCanvas(state.regions.pipelineNumber, sourceCanvas), { minWidth: 900, minHeight: 160, maxScale: 5, padding: 28 });
+      const splitCanvas = normalizeRegionForMineru(cropRegionToCanvas(state.regions.splitPoint, sourceCanvas), { minWidth: 520, maxScale: 2, padding: 10 });
+      const padding = 18;
+      const gap = 18;
+      const labelHeight = 34;
+      const contentWidth = Math.max(pipelineCanvas.width, splitCanvas.width, 120);
+      const c = document.createElement('canvas');
+      c.width = contentWidth + padding * 2;
+      c.height = padding + labelHeight + pipelineCanvas.height + gap + labelHeight + splitCanvas.height + padding;
+      const cctx = c.getContext('2d');
+      cctx.fillStyle = '#fff';
+      cctx.fillRect(0, 0, c.width, c.height);
+      let top = padding;
+      drawLabeledRegion(cctx, 'PIPELINE NUMBER AREA', pipelineCanvas, padding, top, contentWidth, '#fa8c16');
+      top += labelHeight + pipelineCanvas.height + gap;
+      drawLabeledRegion(cctx, 'SPLIT POINT AREA / COORDINATE AREA', splitCanvas, padding, top, contentWidth, '#1677ff');
+      return c;
+    }
+
+    async function canvasToImageBlob(sourceCanvas) {
+      return new Promise((resolve, reject) => {
+        sourceCanvas.toBlob(blob => {
+          if (!blob) return reject(new Error('区域截图生成失败'));
+          resolve(blob);
+        }, 'image/png');
+      });
+    }
+
+    async function canvasToSinglePagePdfBlob(sourceCanvas) {
+      if (!window.PDFLib || !window.PDFLib.PDFDocument) {
+        throw new Error('PDF 组件未加载，无法提交 OCR 标框');
+      }
+      const pdfDoc = await window.PDFLib.PDFDocument.create();
+      const pngBlob = await canvasToImageBlob(sourceCanvas);
+      const pngBytes = await pngBlob.arrayBuffer();
+      const image = await pdfDoc.embedPng(pngBytes);
+      const page = pdfDoc.addPage([sourceCanvas.width, sourceCanvas.height]);
+      page.drawImage(image, {
+        x: 0,
+        y: 0,
+        width: sourceCanvas.width,
+        height: sourceCanvas.height
+      });
+      const bytes = await pdfDoc.save();
+      return new Blob([bytes], { type: 'application/pdf' });
+    }
+
+    async function blobToBase64(blob) {
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      return btoa(binary);
+    }
+
+    async function buildBackendRecognitionUpload(pageNum, signal, pageCanvasCache) {
+      throwIfAborted(signal);
+      const sourceCanvas = pageCanvasCache && pageCanvasCache.has(pageNum)
+        ? pageCanvasCache.get(pageNum)
+        : await prepareRecognitionCanvas(pageNum);
+      if (pageCanvasCache) pageCanvasCache.set(pageNum, sourceCanvas);
+      const pipelineUpload = await buildRegionPdfBlob('pipelineNumber', sourceCanvas);
+      const splitPointUpload = await buildRegionPdfBlob('splitPoint', sourceCanvas);
+      const splitPointTiles = Array.isArray(splitPointUpload.tileBlobs) && splitPointUpload.tileBlobs.length
+        ? splitPointUpload.tileBlobs
+        : [splitPointUpload.blob];
+      return {
+        page: pageNum,
+        pipelinePdfBase64: await blobToBase64(pipelineUpload.blob),
+        pipelinePageCount: pipelineUpload.pageCount || 1,
+        pipelineCropMode: pipelineUpload.cropMode || '',
+        splitPointPdfBase64: await blobToBase64(splitPointUpload.blob),
+        splitPointTileBase64List: await Promise.all(splitPointTiles.map(blobToBase64)),
+        splitPointPageCount: splitPointUpload.pageCount || 1,
+        splitPointCropMode: splitPointUpload.cropMode || ''
+      };
+    }
+
+    async function startBackendRecognitionJob(pageNums, uploads, signal) {
+      const response = await fetch('/idf-recognition/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+          pages: pageNums,
+          uploads
+        }),
+        signal
+      });
+      if (!response.ok) throw new Error(`后台识别任务提交失败: ${response.status} ${await response.text()}`);
+      const data = await response.json();
+      if (!data.ok || !data.jobId) throw new Error(data.error || '后台识别任务未返回编号');
+      return data.jobId;
+    }
+
+    async function waitBackendRecognitionJob(jobId, signal) {
+      while (true) {
+        throwIfAborted(signal);
+        const response = await fetch(`/idf-recognition/job/${encodeURIComponent(jobId)}`, {
+          cache: 'no-store',
+          signal
+        });
+        if (!response.ok) throw new Error(`后台识别任务查询失败: ${response.status}`);
+        const data = await response.json();
+        if (!data.ok) throw new Error(data.error || '后台识别任务查询失败');
+        setStatus(`后台识别 ${data.message || data.stage || ''}`, data.progress || 0);
+        if (Array.isArray(data.results) && data.results.length) {
+          const partial = hydrateBackendRecognitionJobs(data.results);
+          lastRecognitionJobs = partial;
+          renderResult(lastRecognitionJobs);
+        }
+        if (data.status === 'done') return data.results || [];
+        if (data.status === 'cancelled') throw new DOMException('识别已停止', 'AbortError');
+        if (data.status === 'error') throw new Error(data.error || '后台识别失败');
+        await waitWithSignal(1000, signal);
+      }
+    }
+
+    function hydrateBackendRecognitionJobs(jobs) {
+      return (jobs || []).map(job => {
+        const splitPointText = job.splitPointText || '';
+        return {
+          ...job,
+          coordinateBlocks: splitPointText ? extractCoordinateBlocks(splitPointText, { allowInferred: true }) : (job.coordinateBlocks || []),
+          connectionMarkers: splitPointText ? extractConnectionMarkers(splitPointText, job.page) : (job.connectionMarkers || []),
+          splitPointAttempts: job.splitPointAttempts || (splitPointText ? [splitPointText] : [])
+        };
+      }).sort((a, b) => a.page - b.page);
+    }
+
+    async function cancelBackendRecognitionJob(jobId) {
+      if (!jobId) return;
+      try {
+        await fetch(`/idf-recognition/job/${encodeURIComponent(jobId)}/cancel`, {
+          method: 'POST',
+          cache: 'no-store'
+        });
+      } catch (error) {
+        console.warn('取消后台识别任务失败:', error);
+      }
+    }
+
+    function canvasToPngDataUrl(sourceCanvas) {
+      return sourceCanvas.toDataURL('image/png');
+    }
+
+    function splitCanvasWithOverlap(sourceCanvas, options = {}) {
+      const overlapRatio = Number.isFinite(options.overlapRatio) ? options.overlapRatio : 0.15;
+      const columns = Math.max(1, options.columns || (sourceCanvas.width >= 700 ? 2 : 1));
+      const rows = Math.max(1, options.rows || (sourceCanvas.height >= 700 ? 2 : 1));
+      if (columns === 1 && rows === 1) return [sourceCanvas];
+
+      const baseWidth = sourceCanvas.width / columns;
+      const baseHeight = sourceCanvas.height / rows;
+      const tileWidth = Math.min(sourceCanvas.width, Math.ceil(baseWidth * (1 + overlapRatio)));
+      const tileHeight = Math.min(sourceCanvas.height, Math.ceil(baseHeight * (1 + overlapRatio)));
+      const tiles = [];
+
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column < columns; column += 1) {
+          const sx = columns === 1 ? 0 : Math.round(column * (sourceCanvas.width - tileWidth) / (columns - 1));
+          const sy = rows === 1 ? 0 : Math.round(row * (sourceCanvas.height - tileHeight) / (rows - 1));
+          const tile = document.createElement('canvas');
+          tile.width = tileWidth;
+          tile.height = tileHeight;
+          const tileCtx = tile.getContext('2d');
+          tileCtx.fillStyle = '#fff';
+          tileCtx.fillRect(0, 0, tile.width, tile.height);
+          tileCtx.drawImage(sourceCanvas, sx, sy, tileWidth, tileHeight, 0, 0, tileWidth, tileHeight);
+          tiles.push(tile);
+        }
+      }
+      return tiles;
+    }
+
+    async function buildRegionPdfBlob(regionType, sourceCanvas, options = {}) {
+      const region = state.regions[regionType];
+      const raw = cropRegionToCanvas(region, sourceCanvas);
+      if (regionType === 'pipelineNumber') {
+        const normalized = normalizeRegionForMineru(raw, { minWidth: 900, minHeight: 160, maxScale: 5, padding: 28 });
+        return { blob: await canvasToImageBlob(normalized), pageCount: 1 };
+      }
+
+      const cropModes = {
+        initial: { columns: raw.width >= 700 ? 2 : 1, rows: raw.height >= 700 ? 2 : 1, overlapRatio: 0.15 },
+        retry1: { columns: 3, rows: 2, overlapRatio: 0.28 },
+        retry2: { columns: 2, rows: 3, overlapRatio: 0.28 }
+      };
+      const cropMode = options.cropMode || 'initial';
+      const tileOptions = cropModes[cropMode] || cropModes.initial;
+      const tiles = splitCanvasWithOverlap(raw, tileOptions).map(tile =>
+        normalizeRegionForMineru(tile, { minWidth: 900, maxScale: 2, padding: 18 })
+      );
+      const tileBlobs = await Promise.all(tiles.map(tile => canvasToImageBlob(tile)));
+      return {
+        blob: tileBlobs[0],
+        tileBlobs,
+        pageCount: tiles.length,
+        cropMode
+      };
+    }
+
+    function throwIfAborted(signal) {
+      if (signal && signal.aborted) throw new DOMException('识别已停止', 'AbortError');
+    }
+
+    function waitWithSignal(ms, signal) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, ms);
+        if (!signal) return;
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new DOMException('识别已停止', 'AbortError'));
+        }, { once: true });
+      });
+    }
+
+    function pollJobInWorker(jobId, label, signal) {
+      return new Promise((resolve, reject) => {
+        const workerSource = `
+          let stopped = false;
+          self.onmessage = async event => {
+            const { origin, jobId } = event.data;
+            const started = Date.now();
+            while (!stopped && Date.now() - started < 4 * 60 * 60 * 1000) {
+              try {
+                const response = await fetch(origin + '/mineru/pdf/job/' + encodeURIComponent(jobId), { cache: 'no-store' });
+                if (!response.ok) throw new Error('MinerU task query failed: ' + response.status);
+                const data = await response.json();
+                self.postMessage({ type: 'progress', data });
+                if (data.status === 'done') {
+                  self.postMessage({ type: 'done', data: data.result || data });
+                  return;
+                }
+                if (data.status === 'error' || data.error) {
+                  self.postMessage({ type: 'error', message: data.error || 'MinerU recognition failed' });
+                  return;
+                }
+              } catch (error) {
+                self.postMessage({ type: 'network-error', message: error.message });
+              }
+              await new Promise(done => setTimeout(done, 1000));
+            }
+            if (!stopped) self.postMessage({ type: 'error', message: 'MinerU recognition timeout' });
+          };
+        `;
+        const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: 'application/javascript' }));
+        const worker = new Worker(workerUrl);
+        const cleanup = () => {
+          worker.terminate();
+          URL.revokeObjectURL(workerUrl);
+        };
+        const abort = () => {
+          cleanup();
+          reject(new DOMException('识别已停止', 'AbortError'));
+        };
+        if (signal) signal.addEventListener('abort', abort, { once: true });
+        worker.onmessage = async event => {
+          const message = event.data || {};
+          if (message.type === 'progress') {
+            const data = message.data || {};
+            setStatus(`${label}: ${data.stage || 'MinerU 后台识别中...'}`, data.progress || 15);
+            return;
+          }
+          if (message.type === 'done') {
+            if (signal) signal.removeEventListener('abort', abort);
+            cleanup();
+            try {
+              resolve(await hydrateMineruMarkdown(message.data, signal));
+            } catch (error) {
+              reject(error);
+            }
+            return;
+          }
+          if (message.type === 'error') {
+            if (signal) signal.removeEventListener('abort', abort);
+            cleanup();
+            reject(new Error(message.message || 'MinerU 后台识别失败'));
+          }
+        };
+        worker.onerror = error => {
+          if (signal) signal.removeEventListener('abort', abort);
+          cleanup();
+          reject(new Error(error.message || '后台识别线程异常'));
+        };
+        worker.postMessage({ origin: window.location.origin, jobId });
+      });
+    }
+
+    async function pollJob(jobId, label, signal) {
+      if (window.Worker) {
+        return pollJobInWorker(jobId, label, signal);
+      }
+      const started = Date.now();
+      while (Date.now() - started < 20 * 60 * 1000) {
+        throwIfAborted(signal);
+        await waitWithSignal(1000, signal);
+        const resp = await fetch(`/mineru/pdf/job/${jobId}`, { cache: 'no-store', signal });
+        if (!resp.ok) throw new Error(`MinerU 任务查询失败: ${resp.status}`);
+        const data = await resp.json();
+        setStatus(`${label}: ${data.stage || 'MinerU 正在识别...'}`, data.progress || 15);
+        if (data.status === 'done') return hydrateMineruMarkdown(data.result || data, signal);
+        if (data.status === 'error' || data.error) throw new Error(data.error || 'MinerU 识别失败');
+      }
+      throw new Error('MinerU 识别超时');
+    }
+
+    async function hydrateMineruMarkdown(result, signal) {
+      const taskId = result && (result.excel_task_id || result.task_id || result.export_task_id);
+      if (!taskId || result.markdown) return result;
+      try {
+        const resp = await fetch(`/mineru/task/${encodeURIComponent(taskId)}`, { cache: 'no-store', signal });
+        if (!resp.ok) return result;
+        const task = await resp.json();
+        if (task && task.markdown) return { ...result, markdown: task.markdown, mineru_task: task };
+      } catch (error) {
+        if (error && error.name === 'AbortError') throw error;
+        console.warn('读取 MinerU 原始 Markdown 失败:', error);
+      }
+      return result;
+    }
+
+    async function submitRegionToMineruUnsafe(regionPdf, pageNum, regionType, pageCount = 1, signal) {
+      throwIfAborted(signal);
+      const formData = new FormData();
+      formData.append('pdf_file', regionPdf, `idf_${regionType}_page_${pageNum}.pdf`);
+      formData.append('template', JSON.stringify({
+        materialArea: { x: 0, y: 0, width: 1, height: 1, page: 1 },
+        start_page: 1,
+        end_page: pageCount,
+        page_range: Array.from({ length: pageCount }, (_, index) => index + 1),
+        idfSplitPointMode: true,
+        idfRegionType: regionType,
+        originalPage: pageNum
+      }));
+      formData.append('lang', 'ch');
+      const resp = await fetch('/mineru/pdf/recognize', { method: 'POST', body: formData, signal });
+      if (!resp.ok) throw new Error(`MinerU 提交失败: ${resp.status} ${await resp.text()}`);
+      const submit = await resp.json();
+      if (!submit.success || !submit.job_id) throw new Error(submit.error || 'MinerU 未返回任务编号');
+      return pollJob(submit.job_id, `第 ${pageNum} 页 ${regionType}`, signal);
+    }
+
+    async function submitRegionToMineru(regionPdf, pageNum, regionType, pageCount = 1, signal) {
+      await acquireMineruSlot(signal);
+      try {
+        return await submitRegionToMineruUnsafe(regionPdf, pageNum, regionType, pageCount, signal);
+      } finally {
+        releaseMineruSlot();
+      }
+    }
+
+    async function submitRegionUpload(upload, pageNum, regionType, signal) {
+      const tileBlobs = Array.isArray(upload?.tileBlobs) ? upload.tileBlobs : [];
+      if (tileBlobs.length <= 1) {
+        return submitRegionToMineru(upload.blob, pageNum, regionType, upload.pageCount || 1, signal);
+      }
+
+      const tileErrors = [];
+      const results = await Promise.all(tileBlobs.map(async (blob, index) => {
+        try {
+          return await submitRegionToMineru(blob, pageNum, `${regionType}-tile-${index + 1}`, 1, signal);
+        } catch (error) {
+          if (!isEmptyMarkdownMineruError(error)) throw error;
+          const message = String(error && error.message || error || '');
+          tileErrors.push({ index: index + 1, message });
+          return { success: false, markdown: '', emptyTile: true, error: message };
+        }
+      }));
+      return {
+        success: true,
+        markdown: results.map(getMineruText).filter(Boolean).join('\n\n'),
+        parallelResults: results,
+        tileCount: tileBlobs.length,
+        tileErrors
+      };
+    }
+
+    async function submitRegionUploadCached(upload, pageNum, submitRegionType, cacheRegionType, signal) {
+      const cacheKey = buildMineruCacheKey(pageNum, cacheRegionType, upload);
+      if (mineruResultCache.has(cacheKey)) {
+        const cached = mineruResultCache.get(cacheKey);
+        if (getMineruText(cached)) return { ...cached, fromCache: true };
+        mineruResultCache.delete(cacheKey);
+      }
+      const persistentCached = readPersistentMineruCache(cacheKey);
+      if (persistentCached) {
+        if (getMineruText(persistentCached)) return { ...persistentCached, fromCache: true };
+        try {
+          localStorage.removeItem(MINERU_CACHE_STORAGE_PREFIX + cacheKey);
+        } catch (error) {
+          console.warn('清理失效 MinerU 本地缓存失败:', error);
+        }
+      }
+      let result;
+      try {
+        result = await submitRegionUpload(upload, pageNum, submitRegionType, signal);
+      } catch (error) {
+        const message = String(error && error.message || error || '');
+        const shouldRetry = /404|Job not found|not found|未找到|后台识别|MinerU task query failed/i.test(message);
+        if (!shouldRetry) throw error;
+        setStatus(`第 ${pageNum} 页后台识别数据不存在，正在重新提交 MinerU`, 15);
+        result = await submitRegionUpload(upload, pageNum, `${submitRegionType}-resubmit`, signal);
+      }
+      if (!getMineruText(result)) {
+        setStatus(`第 ${pageNum} 页未读取到原始 Markdown，正在重新提交 MinerU`, 15);
+        result = await submitRegionUpload(upload, pageNum, `${submitRegionType}-markdown-resubmit`, signal);
+      }
+      writePersistentMineruCache(cacheKey, result);
+      return result;
+    }
+
+    function getMineruText(payload) {
+      if (!payload) return '';
+      if (typeof payload === 'string') return payload;
+      return payload.markdown ||
+        payload.md ||
+        payload.text ||
+        payload.content ||
+        payload.result_text ||
+        (payload.data && getMineruText(payload.data)) ||
+        (payload.result && getMineruText(payload.result)) ||
+        (Array.isArray(payload.results) && payload.results.map(getMineruText).filter(Boolean).join('\n\n')) ||
+        (Array.isArray(payload.files) && payload.files.map(getMineruText).filter(Boolean).join('\n\n')) ||
+        (Array.isArray(payload.content_list) && payload.content_list.map(item => item.text || item.content || '').filter(Boolean).join('\n')) ||
+        (payload.mineru_task && payload.mineru_task.markdown) ||
+        '';
+    }
+
+    function isEmptyMarkdownMineruError(error) {
+      const message = String(error && error.message || error || '');
+      return /未生成\s*Markdown|未返回\s*Markdown|图片可能太小|格式不支持|too small|unsupported|no markdown/i.test(message);
+    }
+
+    function cleanLine(line) {
+      return String(line || '')
+        .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/<\/?[^>]+>/g, ' ')
+        .replace(/^#+\s*/g, '')
+        .replace(/^[>*\-\s`]+|[*`\s]+$/g, '')
+        .trim();
+    }
+
+    function normalizeText(text) {
+      return String(text || '')
+        .normalize('NFKC')
+        .replace(/[—–]/g, '-')
+        .replace(/[：:|;,，]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function findPipelineToken(text) {
+      const lines = String(text || '').split(/\r?\n/).map(cleanLine).map(normalizeText).filter(Boolean);
+      const joined = lines.join(' ').toUpperCase();
+      const patterns = [
+        /\b\d{2,4}-[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9_\/\\-]+\b/g,
+        /\b[A-Z0-9]{1,8}(?:[-\/\\][A-Z0-9_]+){2,}\b/g
+      ];
+      for (const pattern of patterns) {
+        const matches = joined.match(pattern) || [];
+        const best = matches
+          .map(item => item.replace(/\s+/g, ''))
+          .filter(item => item.includes('-') && /[A-Z]/.test(item) && /\d/.test(item))
+          .sort((a, b) => b.length - a.length)[0];
+        if (best) return best;
+      }
+      return '';
+    }
+
+    function normalizeCoordinateLines(text) {
+      return String(text || '')
+        .replace(/\r/g, '\n')
+        .replace(/[：:]/g, ' ')
+        .split(/\n+/)
+        .map(cleanLine)
+        .flatMap(line => line.split(/\s{2,}|\t+/))
+        .map(line => normalizeText(line).toUpperCase())
+        .filter(Boolean);
+    }
+
+    function extractCoordinateBlocks(text, options = {}) {
+      const allowInferred = !!options.allowInferred;
+      const markdown = String(text || '')
+        .normalize('NFKC')
+        .replace(/\r/g, '\n')
+        .replace(/[：:]/g, ' ');
+      const tokens = [];
+      const pattern = /(?:^|[^A-Z0-9])(EL|E|S)(?:\b|(?=[+-]?\d))\s*([+-]?\d+(?:\.\d+)?)/gim;
+      let match;
+      while ((match = pattern.exec(markdown))) {
+        tokens.push({
+          index: match.index,
+          label: match[1].toUpperCase(),
+          value: match[2]
+        });
+      }
+
+      const blocks = [];
+      const seen = new Set();
+      const addBlock = (e, s, el, options = {}) => {
+        const key = `${e}|${s}|${el}`;
+        if (seen.has(key)) return;
+        blocks.push({
+          e,
+          s,
+          el,
+          key,
+          numericKey: `${normalizeCoordinateNumber(e)}|${normalizeCoordinateNumber(s)}|${normalizeCoordinateNumber(el)}`,
+          inferred: !!options.inferred,
+          text: `E ${e}\nS ${s}\nEL ${el}`
+        });
+        seen.add(key);
+      };
+      for (let i = 0; i < tokens.length - 2; i += 1) {
+        const a = tokens[i], b = tokens[i + 1], c = tokens[i + 2];
+        if (a.label === 'E' && b.label === 'S' && c.label === 'EL') {
+          addBlock(a.value, b.value, c.value);
+          i += 2;
+        }
+      }
+      if (allowInferred) {
+      const lineTokens = normalizeCoordinateLines(markdown)
+        .map(line => {
+          const labelMatch = line.match(/^(EL|E|S)\s*[:：-]?\s*([+-]?\d+(?:\.\d+)?)$/i);
+          if (labelMatch) return { label: labelMatch[1].toUpperCase(), value: labelMatch[2] };
+          const numberMatch = line.match(/^([+-]?\d{4,}(?:\.\d+)?)$/);
+          return numberMatch ? { label: '', value: numberMatch[1] } : null;
+        })
+        .filter(Boolean);
+      for (let i = 0; i < lineTokens.length - 2; i += 1) {
+        const group = [lineTokens[i], lineTokens[i + 1], lineTokens[i + 2]];
+        const expected = ['E', 'S', 'EL'];
+        const compatible = group.every((item, index) => !item.label || item.label === expected[index]);
+          const hasMissingLabel = group.some(item => !item.label);
+          const elHasPlusSign = /^\+/.test(String(group[2].value || '').trim());
+          if (!compatible || !hasMissingLabel || !elHasPlusSign) continue;
+        addBlock(group[0].value, group[1].value, group[2].value, { inferred: true });
+        i += 2;
+      }
+      }
+      return blocks;
+    }
+
+    function normalizeCoordinateNumber(value) {
+      const text = String(value || '').trim();
+      const number = Number(text);
+      if (!Number.isFinite(number)) return text.replace(/^\+/, '');
+      return String(number);
+    }
+
+    function normalizeMarkerLine(line) {
+      return normalizeText(cleanLine(line))
+        .toUpperCase()
+        .replace(/[‘’“”"'`]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function isConnToLine(line) {
+      return /\bCONN\.?\s*TO\b/.test(line);
+    }
+
+    function isContFromLine(line) {
+      return /\bCONT\.?\s*FROM\b/.test(line);
+    }
+
+    function extractTrailingPageNumber(line) {
+      const match = String(line || '').match(/\b(\d{1,4})\b\s*$/);
+      return match ? Number(match[1]) : null;
+    }
+
+    function findNextStandalonePageNumber(lines, startIndex) {
+      for (let index = startIndex + 1; index < Math.min(lines.length, startIndex + 5); index += 1) {
+        const line = lines[index];
+        if (!line) continue;
+        const exact = line.match(/^(\d{1,4})$/);
+        if (exact) return Number(exact[1]);
+        if (/[A-Z]/.test(line) && line.includes('-')) return null;
+      }
+      return null;
+    }
+
+    function extractConnectionMarkers(text, page) {
+      const lines = String(text || '')
+        .replace(/\r/g, '\n')
+        .split(/\n+/)
+        .map(normalizeMarkerLine)
+        .filter(Boolean);
+      const markers = [];
+      lines.forEach((line, index) => {
+        let type = '';
+        if (isConnToLine(line)) type = 'connTo';
+        if (isContFromLine(line)) type = 'contFrom';
+        if (!type) return;
+        const linkedPage = extractTrailingPageNumber(line) || findNextStandalonePageNumber(lines, index);
+        if (!Number.isInteger(linkedPage) || linkedPage <= 0) return;
+        markers.push({ type, page, linkedPage, sourceLine: line });
+      });
+      return markers;
+    }
+
+    function coordinateMapByNumericKey(blocks) {
+      const map = new Map();
+      (blocks || []).forEach(block => {
+        const key = block.numericKey || `${normalizeCoordinateNumber(block.e)}|${normalizeCoordinateNumber(block.s)}|${normalizeCoordinateNumber(block.el)}`;
+        if (!map.has(key)) map.set(key, block);
+      });
+      return map;
+    }
+
+    function withCoordinatePage(block, page) {
+      return { ...(block || {}), page };
+    }
+
+    function findCoordinateMatchesBetweenPages(fromJob, toJob) {
+      const fromMap = coordinateMapByNumericKey(fromJob.coordinateBlocks || []);
+      const toMap = coordinateMapByNumericKey(toJob.coordinateBlocks || []);
+      const exact = [];
+      fromMap.forEach((fromBlock, key) => {
+        const toBlock = toMap.get(key);
+        if (!toBlock) return;
+        exact.push({
+          e: fromBlock.e,
+          s: fromBlock.s,
+          el: fromBlock.el,
+          matchType: (fromBlock.inferred || toBlock.inferred) ? '数值一致匹配' : '连接关系匹配',
+          coordinateBlocks: [
+            withCoordinatePage(fromBlock, fromJob.page),
+            withCoordinatePage(toBlock, toJob.page)
+          ]
+        });
+      });
+      if (exact.length) return exact;
+
+      const tolerance = [];
+      const usedToKeys = new Set();
+      fromMap.forEach(fromBlock => {
+        const fromEl = Number(fromBlock.el);
+        if (!Number.isFinite(fromEl)) return;
+        let best = null;
+        toMap.forEach((toBlock, toKey) => {
+          if (usedToKeys.has(toKey)) return;
+          if (normalizeCoordinateNumber(fromBlock.e) !== normalizeCoordinateNumber(toBlock.e)) return;
+          if (normalizeCoordinateNumber(fromBlock.s) !== normalizeCoordinateNumber(toBlock.s)) return;
+          const toEl = Number(toBlock.el);
+          if (!Number.isFinite(toEl)) return;
+          const diff = Math.abs(fromEl - toEl);
+          if (diff >= 200) return;
+          if (!best || diff < best.diff) best = { toKey, toBlock, diff };
+        });
+        if (!best) return;
+        usedToKeys.add(best.toKey);
+        tolerance.push({
+          e: fromBlock.e,
+          s: fromBlock.s,
+          el: fromBlock.el,
+          matchType: 'EL阈值匹配',
+          elDifference: best.diff,
+          coordinateBlocks: [
+            withCoordinatePage(fromBlock, fromJob.page),
+            withCoordinatePage(best.toBlock, toJob.page)
+          ]
+        });
+      });
+      return tolerance;
+    }
+
+    function buildConnectionPairsLegacyAbsolutePages(jobs) {
+      const jobByPage = new Map();
+      jobs.forEach(job => jobByPage.set(job.page, job));
+      const seen = new Set();
+      const pairs = [];
+      const missingRelations = [];
+      jobs.forEach(job => {
+        (job.connectionMarkers || []).filter(marker => marker.type === 'connTo').forEach(marker => {
+          const targetJob = jobByPage.get(marker.linkedPage);
+          const pairKey = `${job.page}->${marker.linkedPage}`;
+          if (seen.has(pairKey)) return;
+          seen.add(pairKey);
+          if (!targetJob) {
+            missingRelations.push({
+              pipeline: job.pipelineNumber || '',
+              pages: `${job.page}, ${marker.linkedPage}`,
+              expected: 1,
+              found: 0,
+              missing: 1,
+              reason: `第 ${marker.linkedPage} 页未识别`
+            });
+            return;
+          }
+          const reverse = (targetJob.connectionMarkers || []).some(item =>
+            item.type === 'contFrom' && item.linkedPage === job.page
+          );
+          const samePipeline = !job.pipelineNumber || !targetJob.pipelineNumber || job.pipelineNumber === targetJob.pipelineNumber;
+          if (!reverse) {
+            missingRelations.push({
+              pipeline: job.pipelineNumber || targetJob.pipelineNumber || '',
+              pages: `${job.page}, ${targetJob.page}`,
+              expected: 1,
+              found: 0,
+              missing: 1,
+              reason: `第 ${targetJob.page} 页缺少 CONT. FROM ${job.page}`
+            });
+            return;
+          }
+          if (!samePipeline) {
+            missingRelations.push({
+              pipeline: `${job.pipelineNumber || '未识别'} / ${targetJob.pipelineNumber || '未识别'}`,
+              pages: `${job.page}, ${targetJob.page}`,
+              expected: 1,
+              found: 0,
+              missing: 1,
+              reason: '两页管线号不一致'
+            });
+            return;
+          }
+          pairs.push({ fromJob: job, toJob: targetJob });
+        });
+      });
+      return { pairs, missingRelations };
+    }
+
+    function buildConnectionPairs(jobs) {
+      const groups = new Map();
+      jobs.forEach(job => {
+        if (!job.pipelineNumber) return;
+        if (!groups.has(job.pipelineNumber)) groups.set(job.pipelineNumber, []);
+        groups.get(job.pipelineNumber).push(job);
+      });
+      groups.forEach(list => list.sort((a, b) => a.page - b.page));
+
+      const seen = new Set();
+      const pairs = [];
+      const missingRelations = [];
+      jobs.forEach(job => {
+        (job.connectionMarkers || []).filter(marker => marker.type === 'connTo').forEach(marker => {
+          if (!job.pipelineNumber) {
+            missingRelations.push({
+              pipeline: '未识别',
+              pages: String(job.page),
+              expected: 1,
+              found: 0,
+              missing: 1,
+              reason: `第 ${job.page} 页有 CONN. TO ${marker.linkedPage}，但管线号未识别`
+            });
+            return;
+          }
+          const orderedJobs = groups.get(job.pipelineNumber) || [];
+          if (orderedJobs.length <= 1) return;
+          const sourceOrdinal = orderedJobs.findIndex(item => item.page === job.page) + 1;
+          const targetJob = orderedJobs[marker.linkedPage - 1];
+          const pairKey = `${job.pipelineNumber}|${job.page}->${marker.linkedPage}`;
+          if (seen.has(pairKey)) return;
+          seen.add(pairKey);
+
+          if (!targetJob) {
+            return;
+          }
+          if (targetJob.page === job.page) {
+            missingRelations.push({
+              pipeline: job.pipelineNumber,
+              pages: String(job.page),
+              expected: 1,
+              found: 0,
+              missing: 1,
+              reason: `CONN. TO ${marker.linkedPage} 指向当前页`
+            });
+            return;
+          }
+          const reverse = (targetJob.connectionMarkers || []).some(item =>
+            item.type === 'contFrom' && item.linkedPage === sourceOrdinal
+          );
+          if (!reverse) {
+            missingRelations.push({
+              pipeline: job.pipelineNumber,
+              pages: `${job.page}, ${targetJob.page}`,
+              expected: 1,
+              found: 0,
+              missing: 1,
+              reason: `第 ${targetJob.page} 页缺少 CONT. FROM ${sourceOrdinal}`
+            });
+            return;
+          }
+          pairs.push({ fromJob: job, toJob: targetJob });
+        });
+      });
+      return { pairs, missingRelations };
+    }
+
+    function collectRepeatedCoordinateFallback(jobs, existingRows) {
+      const existing = new Set((existingRows || []).map(row =>
+        `${row.pipeline}|${normalizeCoordinateNumber(row.e)}|${normalizeCoordinateNumber(row.s)}|${normalizeCoordinateNumber(row.el)}|${row.pages}`
+      ));
+      const pagesByPipeline = new Map();
+      const coordsByPipeline = new Map();
+      const sourceByPipeline = new Map();
+      jobs.forEach(job => {
+        if (!job.pipelineNumber) return;
+        if (!sourceByPipeline.has(job.pipelineNumber)) sourceByPipeline.set(job.pipelineNumber, job.sourcePdf || '');
+        if (!pagesByPipeline.has(job.pipelineNumber)) pagesByPipeline.set(job.pipelineNumber, new Set());
+        pagesByPipeline.get(job.pipelineNumber).add(job.page);
+        if (!coordsByPipeline.has(job.pipelineNumber)) coordsByPipeline.set(job.pipelineNumber, new Map());
+        const coordMap = coordsByPipeline.get(job.pipelineNumber);
+        (job.coordinateBlocks || []).forEach(block => {
+          const key = block.numericKey || `${normalizeCoordinateNumber(block.e)}|${normalizeCoordinateNumber(block.s)}|${normalizeCoordinateNumber(block.el)}`;
+          if (!coordMap.has(key)) coordMap.set(key, { ...block, pages: new Set(), hasInferred: !!block.inferred });
+          coordMap.get(key).pages.add(job.page);
+          if (block.inferred) coordMap.get(key).hasInferred = true;
+        });
+      });
+
+      const fallbackRows = [];
+      pagesByPipeline.forEach((pages, pipeline) => {
+        if (pages.size <= 1) return;
+        const coordMap = coordsByPipeline.get(pipeline) || new Map();
+        coordMap.forEach(block => {
+          if (block.pages.size < 2) return;
+          const pageText = Array.from(block.pages).sort((a, b) => a - b).join(', ');
+          const rowKey = `${pipeline}|${normalizeCoordinateNumber(block.e)}|${normalizeCoordinateNumber(block.s)}|${normalizeCoordinateNumber(block.el)}|${pageText}`;
+          if (existing.has(rowKey)) return;
+          fallbackRows.push({
+            sourcePdf: sourceByPipeline.get(pipeline) || '',
+            pipeline,
+            e: block.e,
+            s: block.s,
+            el: block.el,
+            pages: pageText,
+            matchType: block.hasInferred ? '兜底-数值一致' : '兜底-重复坐标'
+          });
+        });
+      });
+      return fallbackRows;
+    }
+
+    function analyzeSplitPointsLegacyPageCount(jobs) {
+      const pagesByPipeline = new Map();
+      const coordsByPipeline = new Map();
+      const sourceByPipeline = new Map();
+      const confirmedEmptyPagesByPipeline = new Map();
+      jobs.forEach(job => {
+        if (!job.pipelineNumber) return;
+        if (!sourceByPipeline.has(job.pipelineNumber)) sourceByPipeline.set(job.pipelineNumber, job.sourcePdf || '');
+        if (!pagesByPipeline.has(job.pipelineNumber)) pagesByPipeline.set(job.pipelineNumber, new Set());
+        pagesByPipeline.get(job.pipelineNumber).add(job.page);
+        if (!confirmedEmptyPagesByPipeline.has(job.pipelineNumber)) confirmedEmptyPagesByPipeline.set(job.pipelineNumber, new Set());
+        if ((job.coordinateBlocks || []).length === 0 && (job.splitPointAttempts || []).length >= 2) {
+          confirmedEmptyPagesByPipeline.get(job.pipelineNumber).add(job.page);
+        }
+        if (!coordsByPipeline.has(job.pipelineNumber)) coordsByPipeline.set(job.pipelineNumber, new Map());
+        const coordMap = coordsByPipeline.get(job.pipelineNumber);
+        job.coordinateBlocks.forEach(block => {
+          if (!coordMap.has(block.key)) coordMap.set(block.key, { ...block, pages: new Set() });
+          coordMap.get(block.key).pages.add(job.page);
+          if (block.inferred) coordMap.get(block.key).hasInferred = true;
+        });
+      });
+      const repeated = [];
+      const missing = [];
+      pagesByPipeline.forEach((pages, pipeline) => {
+        const confirmedEmptyPages = confirmedEmptyPagesByPipeline.get(pipeline) || new Set();
+        const expected = Math.max(0, pages.size - 1 - confirmedEmptyPages.size);
+        const found = [];
+        let semanticFoundCount = 0;
+        const coordMap = coordsByPipeline.get(pipeline) || new Map();
+        coordMap.forEach(block => {
+          if (block.pages.size >= 2) {
+            found.push({
+              sourcePdf: sourceByPipeline.get(pipeline) || '',
+              pipeline,
+              e: block.e,
+              s: block.s,
+              el: block.el,
+              pages: Array.from(block.pages).sort((a, b) => a - b).join(', ')
+              ,
+              matchType: block.hasInferred ? '数值一致匹配' : '完整坐标匹配'
+            });
+            semanticFoundCount += 1;
+          }
+        });
+
+        // Exact E/S/EL matches take priority. Only unmatched single-page blocks
+        // use the EL tolerance fallback, and one matched pair is one split point.
+        if (semanticFoundCount < expected) {
+          const candidates = [];
+          coordMap.forEach(block => {
+            if (block.pages.size !== 1) return;
+            const page = Array.from(block.pages)[0];
+            const elValue = Number(block.el);
+            if (!Number.isFinite(elValue)) return;
+            candidates.push({ block, page, elValue });
+          });
+
+          const used = new Set();
+          for (let i = 0; i < candidates.length && semanticFoundCount < expected; i += 1) {
+            if (used.has(i)) continue;
+            const current = candidates[i];
+            let bestIndex = -1;
+            let bestDifference = Infinity;
+            for (let j = i + 1; j < candidates.length; j += 1) {
+              if (used.has(j)) continue;
+              const other = candidates[j];
+              if (current.page === other.page) continue;
+              if (current.block.e !== other.block.e || current.block.s !== other.block.s) continue;
+              const difference = Math.abs(current.elValue - other.elValue);
+              if (difference < 200 && difference < bestDifference) {
+                bestDifference = difference;
+                bestIndex = j;
+              }
+            }
+            if (bestIndex < 0) continue;
+
+            const other = candidates[bestIndex];
+            used.add(i);
+            used.add(bestIndex);
+            const pairItems = [current, other].sort((a, b) => a.page - b.page);
+            found.push({
+              sourcePdf: sourceByPipeline.get(pipeline) || '',
+              pipeline,
+              e: current.block.e,
+              s: current.block.s,
+              el: current.block.el,
+              pages: pairItems.map(item => item.page).join(', '),
+              matchType: 'EL阈值匹配',
+              elDifference: bestDifference,
+              coordinateBlocks: pairItems.map(item => withCoordinatePage(item.block, item.page))
+            });
+            semanticFoundCount += 1;
+          }
+        }
+        repeated.push(...found);
+        if (semanticFoundCount < expected) {
+          missing.push({
+            sourcePdf: sourceByPipeline.get(pipeline) || '',
+            pipeline,
+            pages: Array.from(pages).sort((a, b) => a - b).join(', '),
+            pageCount: pages.size,
+            emptyCoordinatePages: Array.from(confirmedEmptyPages).sort((a, b) => a - b).join(', '),
+            expected,
+            found: semanticFoundCount,
+            missing: expected - semanticFoundCount
+          });
+        }
+      });
+      return { repeated, missing };
+    }
+
+    function analyzeSplitPointsLegacyConnections(jobs) {
+      const repeated = [];
+      const missing = [];
+      const { pairs, missingRelations } = buildConnectionPairs(jobs);
+      pairs.forEach(pair => {
+        const matches = findCoordinateMatchesBetweenPages(pair.fromJob, pair.toJob);
+        if (!matches.length) {
+          missing.push({
+            sourcePdf: pair.fromJob.sourcePdf || pair.toJob.sourcePdf || '',
+            pipeline: pair.fromJob.pipelineNumber || pair.toJob.pipelineNumber || '未识别',
+            pages: `${pair.fromJob.page}, ${pair.toJob.page}`,
+            pageCount: 2,
+            emptyCoordinatePages: [pair.fromJob, pair.toJob]
+              .filter(job => !(job.coordinateBlocks || []).length)
+              .map(job => job.page)
+              .join(', '),
+            expected: 1,
+            found: 0,
+            missing: 1,
+            reason: '连接关系已配对，但两页没有匹配坐标块'
+          });
+          return;
+        }
+        matches.forEach(match => {
+          repeated.push({
+            sourcePdf: pair.fromJob.sourcePdf || pair.toJob.sourcePdf || '',
+            pipeline: pair.fromJob.pipelineNumber || pair.toJob.pipelineNumber || '未识别',
+            e: match.e,
+            s: match.s,
+            el: match.el,
+            pages: `${pair.fromJob.page}, ${pair.toJob.page}`,
+            matchType: match.matchType,
+            elDifference: match.elDifference,
+            coordinateBlocks: match.coordinateBlocks || []
+          });
+        });
+      });
+      repeated.push(...collectRepeatedCoordinateFallback(jobs, repeated));
+      missing.push(...missingRelations.map(row => ({
+        sourcePdf: '',
+        pageCount: 2,
+        emptyCoordinatePages: '',
+        ...row
+      })));
+      return { repeated, missing };
+    }
+
+    function analyzeSplitPoints(jobs) {
+      const repeated = [];
+      const missing = [];
+      const { pairs, missingRelations } = buildConnectionPairs(jobs);
+      const jobsByPipeline = new Map();
+      const pairsByPipeline = new Map();
+
+      (jobs || []).forEach(job => {
+        if (!job.pipelineNumber) return;
+        if (!jobsByPipeline.has(job.pipelineNumber)) jobsByPipeline.set(job.pipelineNumber, []);
+        jobsByPipeline.get(job.pipelineNumber).push(job);
+      });
+      pairs.forEach(pair => {
+        const pipeline = pair.fromJob.pipelineNumber || pair.toJob.pipelineNumber;
+        if (!pipeline) return;
+        if (!pairsByPipeline.has(pipeline)) pairsByPipeline.set(pipeline, []);
+        pairsByPipeline.get(pipeline).push(pair);
+      });
+
+      const rowsByPipeline = new Map();
+      pairs.forEach(pair => {
+        const pipeline = pair.fromJob.pipelineNumber || pair.toJob.pipelineNumber || '未识别';
+        const matches = findCoordinateMatchesBetweenPages(pair.fromJob, pair.toJob);
+        if (!matches.length) return;
+
+        // A matched CONN. TO / CONT. FROM pair represents one split point.
+        const match = matches.find(item => !item.elDifference) || matches[0];
+        const row = {
+          sourcePdf: pair.fromJob.sourcePdf || pair.toJob.sourcePdf || '',
+          pipeline,
+          e: match.e,
+          s: match.s,
+          el: match.el,
+          pages: `${pair.fromJob.page}, ${pair.toJob.page}`,
+          matchType: `${match.matchType || '坐标匹配'} · CONN/CONT 第${pair.fromJob.page}↔${pair.toJob.page}页`,
+          elDifference: match.elDifference,
+          coordinateBlocks: match.coordinateBlocks || [],
+          evidence: `CONN. TO / CONT. FROM：第 ${pair.fromJob.page} 页 ↔ 第 ${pair.toJob.page} 页`
+        };
+        repeated.push(row);
+        if (!rowsByPipeline.has(pipeline)) rowsByPipeline.set(pipeline, []);
+        rowsByPipeline.get(pipeline).push(row);
+      });
+
+      const fallbackRows = collectRepeatedCoordinateFallback(jobs, repeated);
+      jobsByPipeline.forEach((pipelineJobs, pipeline) => {
+        const distinctPages = new Set(pipelineJobs.map(job => job.page));
+        // Repeated pipeline numbers confirm that split points exist even when
+        // one of the pages failed to yield a coordinate block.
+        const minimumExpected = Math.max(0, distinctPages.size - 1);
+        const connectionExpected =
+          (pairsByPipeline.get(pipeline) || []).length +
+          missingRelations.filter(row => row.pipeline === pipeline).length;
+        const expected = Math.max(minimumExpected, connectionExpected);
+        const pipelineRows = rowsByPipeline.get(pipeline) || [];
+
+        if (pipelineRows.length < expected) {
+          const candidates = fallbackRows.filter(row => row.pipeline === pipeline);
+          for (const row of candidates) {
+            if (pipelineRows.length >= expected) break;
+            const duplicate = pipelineRows.some(existing =>
+              normalizeCoordinateNumber(existing.e) === normalizeCoordinateNumber(row.e) &&
+              normalizeCoordinateNumber(existing.s) === normalizeCoordinateNumber(row.s) &&
+              normalizeCoordinateNumber(existing.el) === normalizeCoordinateNumber(row.el) &&
+              existing.pages === row.pages
+            );
+            if (duplicate) continue;
+            repeated.push(row);
+            row.evidence = '页数兜底：跨页重复坐标';
+            pipelineRows.push(row);
+          }
+        }
+
+        if (pipelineRows.length < expected) {
+          missing.push({
+            sourcePdf: pipelineJobs[0]?.sourcePdf || '',
+            pipeline,
+            pages: Array.from(distinctPages).sort((a, b) => a - b).join(', '),
+            pageCount: distinctPages.size,
+            emptyCoordinatePages: pipelineJobs
+              .filter(job => !(job.coordinateBlocks || []).length)
+              .map(job => job.page)
+              .join(', '),
+            expected,
+            found: pipelineRows.length,
+            missing: expected - pipelineRows.length,
+            reason: connectionExpected > minimumExpected
+              ? '按连接关系仍有分图点未找到'
+              : '按页数最低数量仍有分图点未找到'
+          });
+        }
+      });
+
+      missingRelations
+        .filter(row => !jobsByPipeline.has(row.pipeline))
+        .forEach(row => missing.push({
+          sourcePdf: '',
+          pageCount: 2,
+          emptyCoordinatePages: '',
+          ...row
+        }));
+      return { repeated, missing };
+    }
+
+        function buildResultText(jobs) {
+      const lines = ['# 已识别记录'];
+      jobs.forEach(job => {
+        lines.push(`第 ${job.page} 页`);
+        lines.push(`管线号：${job.pipelineNumber || '未识别'}`);
+        lines.push(`坐标块：${job.coordinateBlocks.length}`);
+        job.coordinateBlocks.forEach(block => lines.push(`  E ${block.e} / S ${block.s} / EL ${block.el}`));
+      });
+      const { repeated, missing } = analyzeSplitPoints(jobs);
+      lines.push('', '# 跨页重复分图点');
+      if (!repeated.length) lines.push('未找到跨页重复分图点。');
+      repeated.forEach(row => {
+        const label = row.elDifference != null ? `EL阈值匹配（差值 ${row.elDifference}）` : '坐标匹配';
+        if (row.elDifference != null) {
+          const coords = normalizeRowCoordinateTargets(row).map((block, index) =>
+            `坐标${index + 1}${block.page ? ` 第${block.page}页` : ''}: E ${block.e} / S ${block.s} / EL ${block.el}`
+          ).join('；');
+          lines.push(`${row.sourcePdf} | ${row.pipeline} | ${coords} | 页: ${row.pages} | ${label}`);
+        } else {
+          lines.push(`${row.sourcePdf} | ${row.pipeline} | E ${row.e} | S ${row.s} | EL ${row.el} | 页: ${row.pages} | ${label}`);
+        }
+      });
+      lines.push('', '# 未找到分图点的管线');
+      if (!missing.length) lines.push('无。');
+      missing.forEach(row => lines.push(`${row.sourcePdf} | ${row.pipeline} | 全部页码 ${row.pages} | 空坐标页 ${row.emptyCoordinatePages || '-'} | 出现页数 ${row.pageCount} | 应有 ${row.expected} | 已找到 ${row.found} | 缺少 ${row.missing}`));
+      return lines.join('\n');
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function buildResultHtml(jobs) {
+      const { repeated, missing } = analyzeSplitPoints(jobs);
+      const pageTextHtml = (jobs || []).filter(job =>
+        Array.isArray(job.coordinateBlocks) && job.coordinateBlocks.length > 0
+      ).map(job => {
+        const blocks = Array.isArray(job.coordinateBlocks) ? job.coordinateBlocks : [];
+        const coordinates = blocks.map((block, index) => `
+              <div class="pageTextCoord">${index + 1}. E ${escapeHtml(block.e)} / S ${escapeHtml(block.s)} / EL ${escapeHtml(block.el)}</div>
+            `).join('');
+        return `
+          <div class="pageTextResult">
+            <div class="pageTextHeader">第 ${escapeHtml(job.page)} 页　${escapeHtml(job.pipelineNumber || '未识别管线号')}</div>
+            ${coordinates}
+          </div>
+        `;
+      }).join('');
+      const repeatedHtml = repeated.length
+        ? `<div class="resultSplitGrid">${repeated.map((row, index) => {
+          const coordinateTargets = normalizeRowCoordinateTargets(row);
+          const coordinateHtml = coordinateTargets.map((block, blockIndex) => `
+              <div class="splitPointCoordLine">
+                ${row.elDifference != null ? `<span class="splitPointCoordIndex">坐标${blockIndex + 1}${block.page ? `/${escapeHtml(block.page)}页` : ''}</span>` : ''}
+                <span><span class="coordLabel">E</span> ${escapeHtml(block.e)}</span>
+                <span><span class="coordLabel">S</span> ${escapeHtml(block.s)}</span>
+                <span><span class="coordLabel">EL</span> ${escapeHtml(block.el)}</span>
+              </div>
+            `).join('');
+          return `
+          <div class="splitPointCard${row.elDifference != null ? ' inferred' : ''}">
+            <div class="splitPointTitle">
+              <span>分图点 ${index + 1}</span>
+              <span>${escapeHtml(row.pipeline)}</span>
+            </div>
+            <div class="splitPointCoords${row.elDifference != null ? ' multi' : ''}">
+              ${coordinateHtml}
+            </div>
+            <div class="splitPointMeta">页码: ${escapeHtml(row.pages)}${row.elDifference != null ? ` | EL阈值匹配（差值 ${escapeHtml(row.elDifference)}）` : ' | 坐标匹配'}</div>
+          </div>
+        `; }).join('')}</div>`
+        : '<div class="resultMuted">未找到跨页重复分图点。</div>';
+      const missingHtml = missing.length
+        ? missing.map(row => `<div class="resultLine">${escapeHtml(row.sourcePdf)} | ${escapeHtml(row.pipeline)} | 全部页码 ${escapeHtml(row.pages)} | 空坐标页 ${escapeHtml(row.emptyCoordinatePages || '-')} | 应有 ${escapeHtml(row.expected)} | 已找到 ${escapeHtml(row.found)} | 缺少 ${escapeHtml(row.missing)}</div>`).join('')
+        : '<div class="resultMuted">无。</div>';
+      const unmarkedHtml = ocrUnmarkedCoordinateBlocks.length
+        ? ocrUnmarkedCoordinateBlocks.map(item => {
+          const block = item.block || {};
+          const indexText = Number.isInteger(item.rowIndex) ? `分图点 ${item.rowIndex + 1}${Number.isInteger(item.targetIndex) ? `-${item.targetIndex + 1}` : ''}` : '分图点';
+          return `<div class="resultLine">第 ${escapeHtml(item.page)} 页 | ${escapeHtml(item.pipeline || '未识别管线号')} | ${escapeHtml(indexText)} | E ${escapeHtml(block.e || '-')} | S ${escapeHtml(block.s || '-')} | EL ${escapeHtml(block.el || '-')} | ${escapeHtml(item.reason || '未能标出')}</div>`;
+        }).join('')
+        : '';
+      return `
+        <div class="resultSection">
+          <div class="resultSectionTitle">已识别记录</div>
+          ${pageTextHtml || '<div class="resultMuted">暂无识别结果。</div>'}
+        </div>
+        <div class="resultSection">
+          <div class="resultSectionTitle">跨页重复分图点</div>
+          ${repeatedHtml}
+        </div>
+        <div class="resultSection">
+          <div class="resultSectionTitle">未找到分图点的管线</div>
+          ${missingHtml}
+        </div>
+        ${unmarkedHtml ? `
+        <div class="resultSection">
+          <div class="resultSectionTitle">已识别但未标出的坐标块</div>
+          ${unmarkedHtml}
+        </div>` : ''}
+      `;
+    }
+
+    function renderResult(jobs) {
+      el('result').innerHTML = buildResultHtml(jobs || []);
+    }
+
+    async function writeRecognitionDebugLog(entry) {
+      try {
+        await fetch('/log-recognition', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(entry)
+        });
+      } catch (error) {
+        console.warn('写入识别日志失败:', error);
+      }
+    }
+
+    function writeRecognitionJobsDebugLogs(jobs, reason = 'recognition') {
+      (jobs || []).forEach(job => {
+        writeRecognitionDebugLog({
+          reason,
+          page: job.page,
+          sourcePdf: job.sourcePdf || (state.pdfFile ? state.pdfFile.name : ''),
+          pipelineNumber: job.pipelineNumber || '',
+          coordinateBlockCount: (job.coordinateBlocks || []).length,
+          coordinateBlocks: job.coordinateBlocks || [],
+          connectionMarkers: job.connectionMarkers || [],
+          pipelineText: job.pipelineText || '',
+          splitPointText: job.splitPointText || '',
+          splitPointAttempts: job.splitPointAttempts || [],
+          splitPointTileCount: job.splitPointTileCount || 0,
+          splitPointCropMode: job.splitPointCropMode || '',
+          raw: job.raw || null
+        });
+      });
+    }
+
+    function mergeCoordinateBlocks(existingBlocks, newBlocks) {
+      const merged = new Map();
+      [...(existingBlocks || []), ...(newBlocks || [])].forEach(block => {
+        const key = block.key || `${block.e}|${block.s}|${block.el}`;
+        if (!merged.has(key)) merged.set(key, { ...block, key });
+      });
+      return Array.from(merged.values());
+    }
+
+    function summarizeMarkdownDifference(previousText, currentText) {
+      const previousLines = new Set(String(previousText || '').split(/\r?\n/).map(cleanLine).filter(Boolean));
+      const currentLines = new Set(String(currentText || '').split(/\r?\n/).map(cleanLine).filter(Boolean));
+      return {
+        addedLines: Array.from(currentLines).filter(line => !previousLines.has(line)),
+        missingLines: Array.from(previousLines).filter(line => !currentLines.has(line))
+      };
+    }
+
+    function getMissingPipelinePages(jobs) {
+      const missingPipelines = new Set(analyzeSplitPoints(jobs).missing.map(row => row.pipeline));
+      return jobs
+        .filter(job => job.pipelineNumber && missingPipelines.has(job.pipelineNumber))
+        .map(job => job.page)
+        .filter((page, index, pages) => pages.indexOf(page) === index)
+        .sort((a, b) => a - b);
+    }
+
+    async function retryMissingSplitPointPages(maxRetries, signal, pageCanvasCache = null) {
+      const getSourceCanvas = async pageNum => {
+        if (pageCanvasCache && pageCanvasCache.has(pageNum)) return pageCanvasCache.get(pageNum);
+        const sourceCanvas = await prepareRecognitionCanvas(pageNum);
+        if (pageCanvasCache) pageCanvasCache.set(pageNum, sourceCanvas);
+        return sourceCanvas;
+      };
+      for (let retry = 1; retry <= maxRetries; retry += 1) {
+        throwIfAborted(signal);
+        const retryPages = getMissingPipelinePages(lastRecognitionJobs);
+        if (!retryPages.length) return;
+
+        for (let index = 0; index < retryPages.length; index += 1) {
+          throwIfAborted(signal);
+          const pageNum = retryPages[index];
+          const job = lastRecognitionJobs.find(item => item.page === pageNum);
+          if (!job) continue;
+
+          const progress = Math.round(((retry - 1) + index / retryPages.length) / maxRetries * 100);
+          setStatus(`补识别第 ${retry}/${maxRetries} 轮: 第 ${pageNum} 页坐标块`, progress);
+          const sourceCanvas = await getSourceCanvas(pageNum);
+          const cropMode = retry === 1 ? 'retry1' : 'retry2';
+          const splitPointUpload = await buildRegionPdfBlob('splitPoint', sourceCanvas, { cropMode });
+          const splitPointResult = await submitRegionUploadCached(
+            splitPointUpload,
+            pageNum,
+            `split-point-retry-${retry}`,
+            'splitPoint',
+            signal
+          );
+          const splitPointText = getMineruText(splitPointResult);
+          const coordinateBlocks = extractCoordinateBlocks(splitPointText, { allowInferred: true });
+          const connectionMarkers = extractConnectionMarkers(splitPointText, pageNum);
+          const beforeCount = job.coordinateBlocks.length;
+          const previousAttemptText = (job.splitPointAttempts || []).slice(-1)[0] || job.splitPointText || '';
+          const markdownDifference = summarizeMarkdownDifference(previousAttemptText, splitPointText);
+          job.coordinateBlocks = mergeCoordinateBlocks(job.coordinateBlocks, coordinateBlocks);
+          job.connectionMarkers = [...(job.connectionMarkers || []), ...connectionMarkers]
+            .filter((marker, index, list) =>
+              list.findIndex(item => item.type === marker.type && item.page === marker.page && item.linkedPage === marker.linkedPage) === index
+            );
+          job.splitPointAttempts = [...(job.splitPointAttempts || []), splitPointText];
+
+          writeRecognitionDebugLog({
+            page: pageNum,
+            sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+            pipelineNumber: job.pipelineNumber,
+            retryRound: retry,
+            retryReason: 'missing-cross-page-split-point',
+            previousCoordinateBlockCount: beforeCount,
+            retryCoordinateBlockCount: coordinateBlocks.length,
+            mergedCoordinateBlockCount: job.coordinateBlocks.length,
+            coordinateBlocks,
+            connectionMarkers,
+            splitPointText,
+            markdownDifference,
+            splitPointTileCount: splitPointUpload.pageCount,
+            splitPointCropMode: splitPointUpload.cropMode,
+            splitPointPayload: splitPointResult
+          });
+          renderResult(lastRecognitionJobs);
+          if (state.pageNumber === pageNum) await refreshCoordinateOverlaysForCurrentPage();
+        }
+      }
+    }
+
+    async function recognizePagesLegacy(pageNums) {
+      if (state.recognizing) return;
+      recognitionController = new AbortController();
+      const signal = recognitionController.signal;
+      state.recognizing = true;
+      await requestRecognitionWakeLock();
+      setButtons();
+      try {
+        if (!state.pdfDoc) throw new Error('请先加载 PDF');
+        if (!state.regions.pipelineNumber || !state.regions.splitPoint) throw new Error('请先框选管线号区域和分图点区域');
+        el('exportExcel').disabled = true;
+        lastRecognitionJobs = [];
+        ocrMarkedPageOverlays.clear();
+        ocrUnmarkedCoordinateBlocks = [];
+        const total = pageNums.length;
+        for (let idx = 0; idx < pageNums.length; idx += 1) {
+        throwIfAborted(signal);
+        const pageNum = pageNums[idx];
+        state.pageNumber = pageNum;
+        await renderPage();
+        const sourceCanvas = await prepareRecognitionCanvas(pageNum);
+        setStatus(`正在识别 ${idx + 1}/${total}: 第 ${pageNum} 页管线号`, Math.round(idx / total * 100));
+        const pipelineUpload = await buildRegionPdfBlob('pipelineNumber', sourceCanvas);
+        const pipelineResult = await submitRegionToMineru(pipelineUpload.blob, pageNum, 'pipeline-number', pipelineUpload.pageCount, signal);
+        const pipelineText = getMineruText(pipelineResult);
+        const pipelineNumber = findPipelineToken(pipelineText);
+        setStatus(`正在识别 ${idx + 1}/${total}: 第 ${pageNum} 页坐标块`, Math.round((idx + 0.5) / total * 100));
+        const splitPointUpload = await buildRegionPdfBlob('splitPoint', sourceCanvas);
+        const splitPointResult = await submitRegionUpload(splitPointUpload, pageNum, 'split-point', signal);
+        const splitPointText = getMineruText(splitPointResult);
+        const coordinateBlocks = extractCoordinateBlocks(splitPointText, { allowInferred: true });
+        const connectionMarkers = extractConnectionMarkers(splitPointText, pageNum);
+        const previewCanvas = buildCombinedPreviewCanvas(sourceCanvas);
+        const job = {
+          page: pageNum,
+          sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+          pipelineNumber,
+          coordinateBlocks,
+          connectionMarkers,
+          pipelineText,
+          splitPointText,
+          splitPointAttempts: [splitPointText],
+          splitPointTileCount: splitPointUpload.pageCount,
+          splitPointCropMode: splitPointUpload.cropMode,
+          raw: { pipeline: pipelineResult, splitPoint: splitPointResult }
+        };
+        lastRecognitionJobs.push(job);
+        writeRecognitionDebugLog({
+          page: pageNum,
+          sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+          pipelineNumber,
+          coordinateBlockCount: coordinateBlocks.length,
+          coordinateBlocks,
+          connectionMarkers,
+          pipelineText,
+          splitPointText,
+          splitPointTileCount: splitPointUpload.pageCount,
+          splitPointCropMode: splitPointUpload.cropMode,
+          pipelinePayload: pipelineResult,
+          splitPointPayload: splitPointResult,
+          images: { combined: canvasToPngDataUrl(previewCanvas) }
+        });
+        renderResult(lastRecognitionJobs);
+        if (state.pageNumber === pageNum) await refreshCoordinateOverlaysForCurrentPage();
+        }
+        await retryMissingSplitPointPages(2, signal);
+        renderResult(lastRecognitionJobs);
+        await refreshCoordinateOverlaysForCurrentPage();
+        el('exportExcel').disabled = false;
+        const remainingMissing = analyzeSplitPoints(lastRecognitionJobs).missing;
+        setStatus(remainingMissing.length ? `识别完成，仍有 ${remainingMissing.length} 个管线未找全分图点` : '识别完成', 100);
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
+          setStatus('识别已停止', 0);
+          return;
+        }
+        throw error;
+      } finally {
+        state.recognizing = false;
+        recognitionController = null;
+        await releaseRecognitionWakeLock();
+        setButtons();
+      }
+    }
+
+    async function mapWithConcurrency(items, limit, worker) {
+      const results = new Array(items.length);
+      let nextIndex = 0;
+      const runners = Array.from(
+        { length: Math.min(Math.max(1, limit), items.length) },
+        async () => {
+          while (nextIndex < items.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            results[index] = await worker(items[index], index);
+          }
+        }
+      );
+      await Promise.all(runners);
+      return results;
+    }
+
+    async function recognizePages(pageNums) {
+      if (state.recognizing) return;
+      recognitionController = new AbortController();
+      const signal = recognitionController.signal;
+      state.recognizing = true;
+      await requestRecognitionWakeLock();
+      setButtons();
+      try {
+        if (!state.pdfDoc) throw new Error('请先加载 PDF');
+        if (!state.regions.pipelineNumber || !state.regions.splitPoint) {
+          throw new Error('请先框选管线号区域和分图点区域');
+        }
+        el('exportExcel').disabled = true;
+        lastRecognitionJobs = [];
+        ocrMarkedPageOverlays.clear();
+        ocrUnmarkedCoordinateBlocks = [];
+        const pageCanvasCache = new Map();
+        const getSourceCanvas = async pageNum => {
+          if (pageCanvasCache.has(pageNum)) return pageCanvasCache.get(pageNum);
+          const sourceCanvas = await prepareRecognitionCanvas(pageNum);
+          pageCanvasCache.set(pageNum, sourceCanvas);
+          return sourceCanvas;
+        };
+
+        const total = pageNums.length;
+        let pipelineCompleted = 0;
+        lastRecognitionJobs = await mapWithConcurrency(pageNums, 1, async pageNum => {
+          throwIfAborted(signal);
+          const sourceCanvas = await getSourceCanvas(pageNum);
+          const pipelineUpload = await buildRegionPdfBlob('pipelineNumber', sourceCanvas);
+          const pipelineResult = await submitRegionUploadCached(
+            pipelineUpload,
+            pageNum,
+            'pipeline-number',
+            'pipelineNumber',
+            signal
+          );
+          const pipelineText = getMineruText(pipelineResult);
+          const pipelineNumber = findPipelineToken(pipelineText);
+          pipelineCompleted += 1;
+          setStatus(
+            `管线号识别 ${pipelineCompleted}/${total}（串行提交）`,
+            Math.round(pipelineCompleted / Math.max(1, total) * 45)
+          );
+          writeRecognitionDebugLog({
+            page: pageNum,
+            sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+            pipelineNumber,
+            recognitionStage: 'pipeline-only',
+            pipelineText,
+            pipelineTileCount: pipelineUpload.pageCount,
+            pipelineCropMode: pipelineUpload.cropMode,
+            pipelinePayload: pipelineResult,
+            splitPointSkipped: true
+          });
+          return {
+            page: pageNum,
+            sourcePdf: state.pdfFile ? state.pdfFile.name : '',
+            pipelineNumber,
+            coordinateBlocks: [],
+            connectionMarkers: [],
+            pipelineText,
+            splitPointText: '',
+            splitPointAttempts: [],
+            splitPointTileCount: 0,
+            splitPointCropMode: '',
+            raw: { pipeline: pipelineResult, splitPoint: null }
+          };
+        });
+        lastRecognitionJobs.sort((a, b) => a.page - b.page);
+        renderResult(lastRecognitionJobs);
+
+        const pipelineCounts = new Map();
+        lastRecognitionJobs.forEach(job => {
+          if (!job.pipelineNumber) return;
+          pipelineCounts.set(job.pipelineNumber, (pipelineCounts.get(job.pipelineNumber) || 0) + 1);
+        });
+        let splitPointJobs = lastRecognitionJobs.filter(job =>
+          job.pipelineNumber && (pipelineCounts.get(job.pipelineNumber) || 0) > 1
+        );
+        if (!splitPointJobs.length) {
+          splitPointJobs = lastRecognitionJobs.filter(job => job.pipelineNumber);
+        }
+
+        let splitCompleted = 0;
+        await mapWithConcurrency(splitPointJobs, 1, async job => {
+          throwIfAborted(signal);
+          const sourceCanvas = await getSourceCanvas(job.page);
+          const splitPointUpload = await buildRegionPdfBlob('splitPoint', sourceCanvas);
+          const splitPointResult = await submitRegionUploadCached(
+            splitPointUpload,
+            job.page,
+            'split-point',
+            'splitPoint',
+            signal
+          );
+          const splitPointText = getMineruText(splitPointResult);
+          const coordinateBlocks = extractCoordinateBlocks(splitPointText, { allowInferred: true });
+          const connectionMarkers = extractConnectionMarkers(splitPointText, job.page);
+          const previewCanvas = buildCombinedPreviewCanvas(sourceCanvas);
+          Object.assign(job, {
+            coordinateBlocks,
+            connectionMarkers,
+            splitPointText,
+            splitPointAttempts: [splitPointText],
+            splitPointTileCount: splitPointUpload.pageCount,
+            splitPointCropMode: splitPointUpload.cropMode,
+            raw: { ...job.raw, splitPoint: splitPointResult }
+          });
+          splitCompleted += 1;
+          setStatus(
+            `重复管线坐标识别 ${splitCompleted}/${splitPointJobs.length}（串行提交）`,
+            45 + Math.round(splitCompleted / Math.max(1, splitPointJobs.length) * 45)
+          );
+          writeRecognitionDebugLog({
+            page: job.page,
+            sourcePdf: job.sourcePdf,
+            pipelineNumber: job.pipelineNumber,
+            coordinateBlockCount: coordinateBlocks.length,
+            coordinateBlocks,
+            connectionMarkers,
+            pipelineText: job.pipelineText,
+            splitPointText,
+            splitPointTileCount: splitPointUpload.pageCount,
+            splitPointCropMode: splitPointUpload.cropMode,
+            pipelinePayload: job.raw.pipeline,
+            splitPointPayload: splitPointResult,
+            images: { combined: canvasToPngDataUrl(previewCanvas) }
+          });
+          renderResult(lastRecognitionJobs);
+        });
+
+        await retryMissingSplitPointPages(2, signal, pageCanvasCache);
+        renderResult(lastRecognitionJobs);
+        await refreshCoordinateOverlaysForCurrentPage();
+        el('exportExcel').disabled = false;
+        const remainingMissing = analyzeSplitPoints(lastRecognitionJobs).missing;
+        setStatus(
+          remainingMissing.length
+            ? `识别完成，仍有 ${remainingMissing.length} 个管线未找全分图点`
+            : `识别完成；${total - splitPointJobs.length} 个非重复管线页已跳过坐标识别`,
+          100
+        );
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
+          setStatus('识别已停止', 0);
+          return;
+        }
+        throw error;
+      } finally {
+        state.recognizing = false;
+        recognitionController = null;
+        await releaseRecognitionWakeLock();
+        setButtons();
+      }
+    }
+
+    async function recognizePagesBackend(pageNums) {
+      if (state.recognizing) return;
+      recognitionController = new AbortController();
+      const signal = recognitionController.signal;
+      state.recognizing = true;
+      await requestRecognitionWakeLock();
+      setButtons();
+      try {
+        if (!state.pdfDoc) throw new Error('请先加载 PDF');
+        if (!state.regions.pipelineNumber || !state.regions.splitPoint) {
+          throw new Error('请先框选管线号区域和分图点区域');
+        }
+        el('exportExcel').disabled = true;
+        lastRecognitionJobs = [];
+        ocrMarkedPageOverlays.clear();
+        ocrUnmarkedCoordinateBlocks = [];
+        activeBackendRecognitionJobId = null;
+        const pageCanvasCache = new Map();
+        const uploads = [];
+        for (let index = 0; index < pageNums.length; index += 1) {
+          throwIfAborted(signal);
+          const pageNum = pageNums[index];
+          setStatus(`准备后台识别数据 ${index + 1}/${pageNums.length}`, Math.round((index + 1) / Math.max(1, pageNums.length) * 12));
+          uploads.push(await buildBackendRecognitionUpload(pageNum, signal, pageCanvasCache));
+        }
+
+        setStatus('识别任务已提交后台，切走页面后服务端仍会继续处理', 15);
+        activeBackendRecognitionJobId = await startBackendRecognitionJob(pageNums, uploads, signal);
+        const backendResults = await waitBackendRecognitionJob(activeBackendRecognitionJobId, signal);
+        lastRecognitionJobs = hydrateBackendRecognitionJobs(backendResults);
+        writeRecognitionJobsDebugLogs(lastRecognitionJobs, 'backend-recognition-done');
+        renderResult(lastRecognitionJobs);
+        await retryMissingSplitPointPages(2, signal, pageCanvasCache);
+        renderResult(lastRecognitionJobs);
+        await refreshCoordinateOverlaysForCurrentPage();
+        el('exportExcel').disabled = false;
+        const remainingMissing = analyzeSplitPoints(lastRecognitionJobs).missing;
+        setStatus(remainingMissing.length ? `识别完成，仍有 ${remainingMissing.length} 条缺失记录` : '识别完成', 100);
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
+          setStatus('识别已停止', 0);
+          return;
+        }
+        throw error;
+      } finally {
+        state.recognizing = false;
+        recognitionController = null;
+        activeBackendRecognitionJobId = null;
+        await releaseRecognitionWakeLock();
+        setButtons();
+      }
+    }
+
+    function parsePageRange(text) {
+      const total = state.totalPages || 0;
+      const pages = new Set();
+      String(text || '').split(/[,\s，]+/).forEach(part => {
+        if (!part) return;
+        const range = part.match(/^(\d+)\s*[-~]\s*(\d+)$/);
+        if (range) {
+          const start = Number(range[1]);
+          const end = Number(range[2]);
+          for (let p = Math.min(start, end); p <= Math.max(start, end); p += 1) {
+            if (p >= 1 && p <= total) pages.add(p);
+          }
+        } else {
+          const p = Number(part);
+          if (p >= 1 && p <= total) pages.add(p);
+        }
+      });
+      return Array.from(pages).sort((a, b) => a - b);
+    }
+
+        function exportExcel() {
+      const { repeated, missing } = analyzeSplitPoints(lastRecognitionJobs);
+      const wb = XLSX.utils.book_new();
+      const exactRows = repeated.filter(row => row.elDifference == null);
+      const toleranceRows = repeated.filter(row => row.elDifference != null);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(exactRows.map(row => ({
+        管线号: row.pipeline,
+        E: row.e,
+        S: row.s,
+        EL: row.el,
+        页码: row.pages
+      }))), '分图点');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toleranceRows.map(row => {
+        const targets = normalizeRowCoordinateTargets(row);
+        const first = targets[0] || row;
+        const second = targets[1] || {};
+        return {
+          管线号: row.pipeline,
+          坐标1页码: first.page || '',
+          E1: first.e || '',
+          S1: first.s || '',
+          EL1: first.el || '',
+          坐标2页码: second.page || '',
+          E2: second.e || '',
+          S2: second.s || '',
+          EL2: second.el || '',
+          匹配页码: row.pages,
+          EL差值: row.elDifference
+        };
+      })), '特殊分图点');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(missing.map(row => ({
+        管线号: row.pipeline,
+        所有页码: row.pages,
+        出现页数: row.pageCount,
+        空坐标页: row.emptyCoordinatePages,
+        应有分图点: row.expected,
+        已找到: row.found,
+        缺少: row.missing
+      }))), '未找到分图点');
+      const sourceName = String(state.pdfFile?.name || '未命名PDF')
+        .replace(/\.pdf$/i, '')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim() || '未命名PDF';
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const name = `分图点识别结果_${sourceName}_${timestamp}.xlsx`;
+      XLSX.writeFile(wb, name);
+    }
+
+    function pointerToRelative(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+        y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+      };
+    }
+
+    el('overlay').addEventListener('pointerdown', event => {
+      if (!state.pdfDoc) return;
+      el('overlay').setPointerCapture(event.pointerId);
+      const p = pointerToRelative(event);
+      state.dragging = { start: p, current: p };
+      drawRegions();
+    });
+    el('overlay').addEventListener('pointermove', event => {
+      if (!state.dragging) return;
+      state.dragging.current = pointerToRelative(event);
+      drawRegions();
+    });
+    el('overlay').addEventListener('pointerup', event => {
+      if (!state.dragging) return;
+      state.dragging.current = pointerToRelative(event);
+      const region = normalizeRegion(state.dragging.start, state.dragging.current);
+      state.dragging = null;
+      if (region && region.width > 0.002 && region.height > 0.002) {
+        state.regions[state.activeRegionType] = region;
+        ocrMarkedPageOverlays.clear();
+        ocrUnmarkedCoordinateBlocks = [];
+        persistRegionTemplate();
+      }
+      drawRegions();
+    });
+
+    el('pdfFileInput').addEventListener('change', event => {
+      const file = event.target.files && event.target.files[0];
+      if (file) loadPdf(file).catch(error => setStatus(`PDF 加载失败: ${error.message}`, 0));
+    });
+    el('regionType').addEventListener('change', event => state.activeRegionType = event.target.value);
+    el('selectSplitPointRegion').addEventListener('click', () => {
+      state.activeRegionType = 'splitPoint';
+      el('regionType').value = 'splitPoint';
+      setStatus('请在 PDF 上拖拽框选分图点区域', 0);
+      setButtons();
+    });
+    el('selectPipelineRegion').addEventListener('click', () => {
+      state.activeRegionType = 'pipelineNumber';
+      el('regionType').value = 'pipelineNumber';
+      setStatus('请在 PDF 上拖拽框选管线号区域', 0);
+      setButtons();
+    });
+    el('clearRegions').addEventListener('click', () => {
+      state.regions = { splitPoint: null, pipelineNumber: null };
+      ocrMarkedPageOverlays.clear();
+      ocrUnmarkedCoordinateBlocks = [];
+      localStorage.removeItem(REGION_TEMPLATE_STORAGE_KEY);
+      drawRegions();
+    });
+    el('exportRegionTemplate').addEventListener('click', exportRegionTemplate);
+    el('importRegionTemplate').addEventListener('click', () => el('regionTemplateFile').click());
+    el('regionTemplateFile').addEventListener('change', async event => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      try {
+        applyRegionTemplate(JSON.parse(await file.text()));
+        setStatus('识别模板已导入', 100);
+      } catch (error) {
+        setStatus(`模板导入失败: ${error.message}`, 0);
+      } finally {
+        event.target.value = '';
+      }
+    });
+    el('prevPage').addEventListener('click', () => {
+      if (state.pageNumber > 1) { state.pageNumber -= 1; renderPage(); }
+    });
+    el('nextPage').addEventListener('click', () => {
+      if (state.pageNumber < state.totalPages) { state.pageNumber += 1; renderPage(); }
+    });
+    el('pageInput').addEventListener('change', event => {
+      const p = Math.max(1, Math.min(state.totalPages, Number(event.target.value) || 1));
+      state.pageNumber = p;
+      renderPage();
+    });
+    el('zoomSelect').addEventListener('change', event => {
+      state.displayScale = Number(event.target.value) || 1;
+      renderPage();
+    });
+    el('zoomIn').addEventListener('click', () => {
+      state.displayScale = Math.min(3, state.displayScale + 0.25);
+      el('zoomSelect').value = String(state.displayScale);
+      renderPage();
+    });
+    el('zoomOut').addEventListener('click', () => {
+      state.displayScale = Math.max(0.5, state.displayScale - 0.25);
+      el('zoomSelect').value = String(state.displayScale);
+      renderPage();
+    });
+    el('runCurrentPage').addEventListener('click', () => recognizePagesBackend([state.pageNumber]).catch(error => setStatus(`识别失败: ${error.message}`, 0)));
+    el('runAllPages').addEventListener('click', () => recognizePagesBackend(Array.from({ length: state.totalPages }, (_, i) => i + 1)).catch(error => setStatus(`识别失败: ${error.message}`, 0)));
+    el('stopRecognition').addEventListener('click', () => {
+      if (!state.recognizing || !recognitionController) return;
+      setStatus('正在停止识别...', 0);
+      cancelBackendRecognitionJob(activeBackendRecognitionJobId);
+      recognitionController.abort();
+    });
+    el('runPageRange').addEventListener('click', () => {
+      const pages = parsePageRange(el('pageRangeInput').value);
+      if (!pages.length) return setStatus('请填写有效页码范围', 0);
+      recognizePagesBackend(pages).catch(error => setStatus(`识别失败: ${error.message}`, 0));
+    });
+    el('exportExcel').addEventListener('click', exportExcel);
+    el('markCoordinateBoxes').addEventListener('click', () => {
+      markCoordinateBoxesWithOcr().catch(error => setStatus(`OCR 标框失败: ${error.message}`, 0));
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && state.recognizing) {
+        requestRecognitionWakeLock();
+      }
+    });
+
+    restoreSavedRegionTemplate();
+    setButtons();
+    updateRegionInfo();
+  </script>
+</body>
+</html>

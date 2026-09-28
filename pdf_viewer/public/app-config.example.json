@@ -1,0 +1,6 @@
+{
+  "ocr_server_port": 8766,
+  "bookmark_log_server_url": "",
+  "bookmark_log_enabled": true,
+  "bookmark_log_upload_enabled": false
+}
