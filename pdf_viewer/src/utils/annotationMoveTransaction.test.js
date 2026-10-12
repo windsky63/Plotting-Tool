@@ -1,4 +1,4 @@
-import { buildAnnotationMoveTransaction, applyAnnotationMovePatches } from './annotationMoveTransaction';
+import { buildAnnotationMoveTransaction, applyAnnotationMovePatches, getAnnotationMovePages } from './annotationMoveTransaction';
 
 test('move transaction preserves numbering/content/other pages and supports undo/redo', () => {
   const original = [
@@ -25,4 +25,18 @@ test('no-op, missing, and invalid coordinates do not produce commands', () => {
   for (const move of [ { id: 'a', updates: a }, { id: 'missing', updates: a }, { id: 'a', updates: { ...a, endX: NaN } } ]) {
     expect(buildAnnotationMoveTransaction([a], [move]).after.size).toBe(0);
   }
+});
+
+test('indexed moves read only moved annotations and mark only their pages for draft persistence', () => {
+  const a = { id: 'a', page: 2, startX: 1, startY: 2, endX: 3, endY: 4 };
+  const b = { id: 'b', page: 4, startX: 5, startY: 6, endX: 7, endY: 8 };
+  const index = new Map([['a', a], ['b', b]]);
+  const untouched = { forEach: () => { throw new Error('must not scan the complete document'); } };
+  const transaction = buildAnnotationMoveTransaction(untouched, [
+    { id: 'a', updates: { ...a, endX: 30 } },
+    { id: 'b', updates: { ...b, endY: 80 } }
+  ], () => false, index);
+  expect(getAnnotationMovePages(transaction.after, index)).toEqual([2, 4]);
+  expect(getAnnotationMovePages(transaction.before, index)).toEqual([2, 4]);
+  expect(getAnnotationMovePages(new Map([['missing', {}]]), index)).toEqual([]);
 });

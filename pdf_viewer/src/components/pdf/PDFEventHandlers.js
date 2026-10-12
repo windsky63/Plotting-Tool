@@ -50,6 +50,7 @@ export const usePDFEventHandlers = ({
   documentKey,
   annotationDragEnabled = true,
   annotations = [],
+  annotationsById = null,
   multiSelectedAnnotationIds = [],
   multiAnnotationStartPositions = null,
   
@@ -64,7 +65,7 @@ export const usePDFEventHandlers = ({
   useAnnotationDragSession({
     containerRef, currentPage, scale, documentKey, enabled: annotationDragEnabled,
     draggingAnnotation, setDraggingAnnotation, annotationDragStart,
-    annotationStartPos, dragType, setDragType, annotations,
+    annotationStartPos, dragType, setDragType, annotations, annotationsById,
     multiSelectedAnnotationIds, multiAnnotationStartPositions,
     onAnnotationUpdate, onAnnotationMoveCommit, onAnnotationDragPreview,
   });

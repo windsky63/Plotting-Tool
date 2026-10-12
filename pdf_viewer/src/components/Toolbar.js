@@ -266,9 +266,18 @@ const AnnotationTools = styled.div`
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px;
+  height: ${TOOLBAR_CONTROL_HEIGHT}px;
+  box-sizing: border-box;
+  padding: 0 8px;
   background: #fafafa;
   border-radius: 6px;
+
+  > .ant-select,
+  .ant-select-selector {
+    height: ${TOOLBAR_CONTROL_HEIGHT}px !important;
+    min-height: ${TOOLBAR_CONTROL_HEIGHT}px !important;
+    box-sizing: border-box;
+  }
   
   .ant-select-sm {
     font-size: 13px;
@@ -309,10 +318,6 @@ const Toolbar = ({
   onAnnotationTopFontSizeChange,
   annotationBottomFontSize = 14,
   onAnnotationBottomFontSizeChange,
-  annotationFrameSize = 100,
-  onAnnotationFrameSizeChange,
-  annotationFrameSizeMode = 'auto-a3',
-  onAnnotationFrameSizeModeChange,
   annotationBorderShape = 'rectangle',
   onAnnotationBorderShapeChange,
   annotationPipeTagRotation = 0,
@@ -509,6 +514,7 @@ const Toolbar = ({
 
   const borderShapeOptions = [
     { label: '菱形框', value: 'diamond', icon: '◇' },
+    { label: '方形框', value: 'rectangle', icon: '□' },
     { label: '圆形框', value: 'circle', icon: '○' },
     { label: '分栏圆形', value: 'split-circle', icon: '◉' },
     { label: '长方形框', value: 'text-rectangle', icon: '▭' },
@@ -578,7 +584,7 @@ const Toolbar = ({
   );
 
   const annotationTools = annotationMode ? (
-    <AnnotationTools>
+    <AnnotationTools role="group" aria-label="标注样式设置">
       {annotationBorderShape === 'split-circle' && (
         <>
           <span style={{ fontSize: 12, color: '#666' }}>上</span>
@@ -681,40 +687,6 @@ const Toolbar = ({
         />
       </Tooltip>
 
-      <Tooltip title="框大小模式">
-        <Select
-          aria-label="框型大小模式"
-          className="annotation-frame-size-control"
-          value={annotationFrameSizeMode}
-          size="small"
-          style={{ width: 112 }}
-          onChange={onAnnotationFrameSizeModeChange}
-          options={[
-            { value: 'auto-a3', label: '自动适应A3' },
-            { value: 'fixed-px', label: '固定px' }
-          ]}
-        />
-      </Tooltip>
-      {annotationFrameSizeMode === 'fixed-px' && (
-        <Tooltip title="框尺寸">
-          <InputNumber
-            aria-label="固定框型大小（px）"
-            className="annotation-frame-size-control"
-            value={annotationFrameSize}
-            min={1}
-            max={300}
-            step={1}
-            precision={1}
-            size="small"
-            addonAfter="px"
-            style={{ width: 108 }}
-            onChange={(value) => {
-              if (value !== null) onAnnotationFrameSizeChange?.(value);
-            }}
-          />
-        </Tooltip>
-      )}
-
       {annotationBorderShape === 'pipe-tag' && (
         <Tooltip title="管段框数字补零个数">
           <InputNumber
@@ -748,7 +720,11 @@ const Toolbar = ({
   ) : null;
 
   const selectedAnnotationTools = selectedAnnotationFontTools?.visible ? (
-    <AnnotationTools style={{ background: '#eef6ff', border: '1px solid #91caff' }}>
+    <AnnotationTools
+      role="group"
+      aria-label="选中标注字体设置"
+      style={{ background: '#eef6ff', boxShadow: 'inset 0 0 0 1px #91caff' }}
+    >
       <span style={{ fontSize: 12, color: '#0958d9', whiteSpace: 'nowrap' }}>
         已选{selectedAnnotationFontTools.count || 1}个
       </span>

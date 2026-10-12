@@ -7,9 +7,6 @@ const ANNOTATION_UNITS_PER_PDF_POINT = 2;
 const MIN_ANNOTATION_PAGE_SCALE = 0.5;
 const MAX_ANNOTATION_PAGE_SCALE = 4;
 
-export const FRAME_SIZE_MODE_AUTO_A3 = 'auto-a3';
-export const FRAME_SIZE_MODE_FIXED_PX = 'fixed-px';
-
 export const getPageAnnotationScale = (pageSize) => {
   const widthMM = Number(pageSize?.widthMM);
   const heightMM = Number(pageSize?.heightMM);
@@ -127,35 +124,3 @@ export const isFixedA3TenMmShape = borderShape => (
   borderShape === 'split-circle' ||
   borderShape === 'diamond'
 );
-
-// Explicit modes are used by the unified frame-size control. Annotations saved
-// before that control existed retain their historical behavior: circles and
-// diamonds use the A3 invariant, while the other shapes keep their stored size.
-export const getAnnotationFrameSizeMode = (annotation, fallbackMode = null) => {
-  if (annotation?.frameSizeMode === FRAME_SIZE_MODE_AUTO_A3 ||
-      annotation?.frameSizeMode === FRAME_SIZE_MODE_FIXED_PX) {
-    return annotation.frameSizeMode;
-  }
-  if (fallbackMode === FRAME_SIZE_MODE_AUTO_A3 || fallbackMode === FRAME_SIZE_MODE_FIXED_PX) {
-    return fallbackMode;
-  }
-  return isFixedA3TenMmShape(annotation?.borderShape)
-    ? FRAME_SIZE_MODE_AUTO_A3
-    : FRAME_SIZE_MODE_FIXED_PX;
-};
-
-export const resolveAnnotationFrameSize = ({
-  annotation = null,
-  pageSize = null,
-  fallbackMode = null,
-  fallbackSize = 56.7
-} = {}) => {
-  const mode = getAnnotationFrameSizeMode(annotation, fallbackMode);
-  if (mode === FRAME_SIZE_MODE_AUTO_A3) {
-    return getFixedA3TenMmFrameSize(pageSize);
-  }
-  const storedSize = Number(annotation?.frameSize);
-  return Number.isFinite(storedSize) && storedSize > 0
-    ? storedSize
-    : (Number(fallbackSize) || 56.7);
-};

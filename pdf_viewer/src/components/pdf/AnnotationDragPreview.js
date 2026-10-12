@@ -1,5 +1,6 @@
 import React, { forwardRef, memo, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
+import { getAnnotationDragTranslation } from '../../utils/annotationDragTranslation';
 
 const PreviewLayer = styled.div`
   position: absolute;
@@ -10,13 +11,27 @@ const PreviewLayer = styled.div`
 `;
 
 // This component, not PDFViewer/App, receives pointer-rate state updates.
-const AnnotationDragPreview = memo(forwardRef(({ pageNumber, renderAnnotations }, ref) => {
+const AnnotationDragPreview = memo(forwardRef(({ pageNumber, renderAnnotations, scale = 1 }, ref) => {
   const [annotations, setAnnotations] = useState([]);
   const layer = useRef(null);
+  const baseline = useRef([]);
   useImperativeHandle(ref, () => ({
-    update: next => setAnnotations(next),
-    clear: () => setAnnotations(current => current.length ? [] : current),
-  }), []);
+    update: next => {
+      const translation = getAnnotationDragTranslation(baseline.current, next);
+      if (translation && layer.current) {
+        layer.current.style.transform = `translate(${translation.dx * scale}px, ${translation.dy * scale}px)`;
+        return;
+      }
+      baseline.current = next;
+      if (layer.current) layer.current.style.transform = '';
+      setAnnotations(next);
+    },
+    clear: () => {
+      baseline.current = [];
+      if (layer.current) layer.current.style.transform = '';
+      setAnnotations(current => current.length ? [] : current);
+    },
+  }), [scale]);
   const hiddenIdsKey = JSON.stringify(annotations.map(a => String(a.id)));
   useLayoutEffect(() => {
     const ids = new Set(JSON.parse(hiddenIdsKey));

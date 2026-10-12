@@ -1,8 +1,7 @@
 import {
   getAnnotationPageSizeFromSnapshot,
   getFixedA3TenMmFrameSize,
-  isFixedA3TenMmShape,
-  resolveAnnotationFrameSize
+  isFixedA3TenMmShape
 } from './pageAnnotationScale';
 
 const PDF_POINTS_PER_MM = 72 / 25.4;
@@ -66,23 +65,3 @@ test.each(['rectangle', 'text-rectangle', 'pipe-tag', 'field-weld', 'shop-weld',
   '%s keeps its existing sizing logic',
   shape => expect(isFixedA3TenMmShape(shape)).toBe(false)
 );
-
-test('unified automatic mode applies the A3 invariant to every frame shape', () => {
-  const pageSize = { width: 2383.94, height: 1683.78 };
-  ['circle', 'split-circle', 'diamond', 'rectangle', 'text-rectangle', 'pipe-tag'].forEach(borderShape => {
-    const frameSize = resolveAnnotationFrameSize({
-      annotation: { borderShape, frameSize: 40, frameSizeMode: 'auto-a3' },
-      pageSize
-    });
-    expect(printedMillimetres(frameSize, pageSize.width, pageSize.height)).toBeCloseTo(10, 8);
-  });
-});
-
-test('unified fixed mode keeps the configured px value for every frame shape', () => {
-  ['circle', 'split-circle', 'diamond', 'rectangle', 'text-rectangle', 'pipe-tag'].forEach(borderShape => {
-    expect(resolveAnnotationFrameSize({
-      annotation: { borderShape, frameSize: 72, frameSizeMode: 'fixed-px' },
-      pageSize: { width: 2383.94, height: 1683.78 }
-    })).toBe(72);
-  });
-});

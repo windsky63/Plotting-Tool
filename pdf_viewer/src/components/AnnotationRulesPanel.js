@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import styled from 'styled-components';
 import {
   Card,
@@ -35,16 +35,20 @@ import {
 } from '@ant-design/icons';
 import { getMaterialQuotaState, getMaterialUsageCounts } from '../utils/materialQuotaUtils';
 import { collectBatchMaterialCandidates } from '../utils/batchMaterialCandidateUtils';
-import { isFixedA3TenMmShape, scaleAnnotationValue } from '../utils/pageAnnotationScale';
+import { isFixedA3TenMmShape } from '../utils/pageAnnotationScale';
 import {
   buildWeldNumberRangeTokens,
-  parseWeldNumberRanges,
-  weldNumberInRanges,
   getAnnotationWeldNumber,
   splitWeldNumberRangeTokens
 } from '../utils/weldNumberRangeUtils';
 import { getStoredWeldDisplayAffixes, getWeldDisplayAffixes } from '../utils/weldDisplayNumberUtils';
 import { selectPanelTextAnnotations } from '../utils/annotationPanelSelectors';
+import { DEFAULT_TEXT_RECTANGLE_FRAME_SIZE } from '../utils/textRectangleFrame';
+import BatchAnnotationAppearance from './BatchAnnotationAppearance';
+import BatchAnnotationFont from './BatchAnnotationFont';
+import BatchControlTitle from './BatchControlTitle';
+import { buildBatchSplitCircleContentUpdates } from '../utils/batchSplitCircleContent';
+import useAnnotationPanelResize from './useAnnotationPanelResize';
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -259,6 +263,9 @@ const PanelContainer = styled.div`
   z-index: 1000;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   transform: ${props => props.$visible ? 'translateX(0)' : 'translateX(100%)'};
   transition: transform 0.3s ease-in-out;
 `;
@@ -307,6 +314,9 @@ const ResizeHandle = styled.div`
 `;
 
 const PanelHeader = styled.div`
+  position: sticky;
+  top: 0;
+  z-index: 10;
   padding: 8px 12px;
   background: white;
   border-bottom: 1px solid #e8e8e8;
@@ -314,43 +324,68 @@ const PanelHeader = styled.div`
   flex-shrink: 0;
 `;
 
-// 上半部分：规则定义区域 - 为规则编辑保留更大的工作区
+// The whole management panel scrolls; rules keep their original working area.
 const RuleDefinitionSection = styled.div`
-  flex: 0 0 64%;
+  flex: 0 0 auto;
+  min-height: 64%;
+  box-sizing: border-box;
   background: white;
   border-bottom: 1px solid #e8e8e8;
   padding: 14px 16px;
-  overflow-y: auto;
+  overflow: visible;
   font-size: 16px !important;
 `;
 
 // 下半部分：标注信息区域 - 增加高度占比
 const AnnotationInfoSection = styled.div`
-  flex: 1;
+  flex: 0 0 auto;
   background: #f8f8f8;
-  padding: 12px;
-  overflow: hidden; /* 禁止外层滚动 */
+  padding: 8px 12px;
+  overflow: visible;
   display: flex;
   flex-direction: column;
 `;
 
-// 标注信息标题栏 - 固定不滚动
+const AnnotationInfoTitle = styled.div`
+  flex: 0 0 auto;
+  padding: 2px 0 8px;
+`;
+
+// Controls occupy their natural height; scrolling belongs to the entire panel.
 const AnnotationInfoHeader = styled.div`
-  flex-shrink: 0;
-  margin-bottom: 16px;
+  flex: 0 0 auto;
+  overflow: visible;
+  padding: 0 4px 8px 0;
+  margin-bottom: 8px;
   background: #f8f8f8;
   z-index: 5;
+
+  > .ant-space {
+    display: flex;
+    padding: 8px;
+    border: 1px solid #e8e8e8;
+    border-radius: 6px;
+    background: white;
+  }
+  > .ant-space > .ant-space-item:first-child {
+    flex: 0 0 100%;
+  }
 `;
 
 // 标注信息表格容器 - 可滚动
 const AnnotationTableContainer = styled.div`
-  flex: 1;
+  flex: 0 0 clamp(300px, 45vh, 520px);
+  height: clamp(300px, 45vh, 520px);
+  box-sizing: border-box;
   overflow: auto;
   display: flex;
   flex-direction: column;
   min-height: 0; /* 关键：允许flex子元素收缩 */
-  padding-bottom: 12px;
+  background: white;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
 `;
+
 
 const RulePreview = styled.div`
   background: #f0f0f0;
@@ -600,14 +635,19 @@ const AnnotationRulesPanel = ({
   const [editingRule, setEditingRule] = useState(null);
   const [isCreating, setIsCreating] = useState(false);
   const [panelWidth, setPanelWidth] = useState(() => {
-    const availableWidth = typeof window === 'undefined' ? 960 : window.innerWidth - 60;
-    return Math.max(600, Math.min(960, availableWidth));
+    const availableWidth = typeof window === 'undefined' ? 960 : Math.max(280, window.innerWidth - 40);
+    return Math.min(960, availableWidth);
   });
-  const [isResizing, setIsResizing] = useState(false);
-  const [batchRegularFontSize, setBatchRegularFontSize] = useState(34);
-  const [batchTopFontSize, setBatchTopFontSize] = useState(16);
-  const [batchBottomFontSize, setBatchBottomFontSize] = useState(34);
-  const [batchAllPagesFontApplying, setBatchAllPagesFontApplying] = useState(false);
+  const panelRef = useRef(null);
+  const annotationTableContainerRef = useRef(null);
+  const { startResize, isResizing } = useAnnotationPanelResize({
+    visible, onWidthChange: setPanelWidth, onToggle
+  });
+  useEffect(() => {
+    const clampWidth = () => setPanelWidth(width => Math.min(width, Math.max(280, window.innerWidth - 40)));
+    window.addEventListener('resize', clampWidth);
+    return () => window.removeEventListener('resize', clampWidth);
+  }, []);
   const [batchDiameterText, setBatchDiameterText] = useState('');
   const [batchJointTypeText, setBatchJointTypeText] = useState('');
   const [batchDiameterRangeText, setBatchDiameterRangeText] = useState('');
@@ -931,8 +971,9 @@ const AnnotationRulesPanel = ({
         fontSize: values.fontSize || 14,
         topFontSize: isSplitCircle ? (values.topFontSize || 16) : (values.topFontSize || values.fontSize || 14),
         bottomFontSize: values.bottomFontSize || values.fontSize || 14,
-        frameSize: editingAnnotation?.frameSize ?? 56.7,
-        frameSizeMode: editingAnnotation?.frameSizeMode,
+        frameSize: nextBorderShape === 'text-rectangle'
+          ? DEFAULT_TEXT_RECTANGLE_FRAME_SIZE
+          : (editingAnnotation?.frameSize ?? 56.7),
         borderShape: nextBorderShape,
         rotation: (values.borderShape || editingAnnotation?.borderShape) === 'pipe-tag'
           ? (Number(values.rotation) || 0)
@@ -1033,106 +1074,6 @@ const AnnotationRulesPanel = ({
       message.success('标注已删除');
     }
   }, [onAnnotationDelete]);
-
-  // 处理ResizeHandle的鼠标按下事件
-  const [mouseDownPos, setMouseDownPos] = useState(null);
-  const [dragStarted, setDragStarted] = useState(false);
-  const resizeHandleRef = useRef(null); // 添加ResizeHandle的引用
-  
-  const handleMouseDown = useCallback((e) => {
-    e.preventDefault();
-    setMouseDownPos({ x: e.clientX, y: e.clientY });
-    setDragStarted(false);
-  }, []);
-  
-  // 添加节流引用
-  const throttleRef = useRef(null);
-  
-  const handleMouseMove = useCallback((e) => {
-    if (!mouseDownPos) return;
-    
-    // 计算鼠标移动距离
-    const deltaX = Math.abs(e.clientX - mouseDownPos.x);
-    const deltaY = Math.abs(e.clientY - mouseDownPos.y);
-    const dragThreshold = 2; // 减少拖拽阈值，提高响应性
-    
-    // 如果移动距离超过阈值，开始拖拽
-    if (!dragStarted && (deltaX > dragThreshold || deltaY > dragThreshold)) {
-      setDragStarted(true);
-      setIsResizing(true);
-    }
-    
-    // 只有在拖拽状态下才调整宽度
-    if (dragStarted && isResizing) {
-      // 清除之前的节流
-      if (throttleRef.current) {
-        cancelAnimationFrame(throttleRef.current);
-      }
-      
-      // 使用requestAnimationFrame节流优化性能
-      throttleRef.current = requestAnimationFrame(() => {
-        const newWidth = window.innerWidth - e.clientX;
-        const minWidth = 560;
-        const maxWidth = Math.min(1280, window.innerWidth - 60);
-        
-        setPanelWidth(Math.max(minWidth, Math.min(maxWidth, newWidth)));
-        throttleRef.current = null;
-      });
-    }
-  }, [mouseDownPos, dragStarted, isResizing]);
-  
-  const handleMouseUp = useCallback((e) => {
-    // 只有在ResizeHandle区域内的点击才切换面板状态
-    // 检查鼠标松开的位置是否在ResizeHandle内
-    if (mouseDownPos && !dragStarted) {
-      // 检查鼠标是否在ResizeHandle区域内
-      if (resizeHandleRef.current) {
-        const rect = resizeHandleRef.current.getBoundingClientRect();
-        const isInHandle = e.clientX >= rect.left && e.clientX <= rect.right &&
-                           e.clientY >= rect.top && e.clientY <= rect.bottom;
-        
-        // 只有在ResizeHandle内点击才触发toggle
-        if (isInHandle && onToggle) {
-          onToggle();
-        }
-      }
-    }
-    
-    // 重置状态
-    setIsResizing(false);
-    setMouseDownPos(null);
-    setDragStarted(false);
-  }, [mouseDownPos, dragStarted, onToggle]);
-  
-  useEffect(() => {
-    if (mouseDownPos) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-      
-      // 只有在拖拽状态下才改变光标和禁用选择
-      if (isResizing) {
-        document.body.style.cursor = 'col-resize';
-        document.body.style.userSelect = 'none';
-      }
-    } else {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-    
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      // 清理节流
-      if (throttleRef.current) {
-        cancelAnimationFrame(throttleRef.current);
-        throttleRef.current = null;
-      }
-    };
-  }, [mouseDownPos, isResizing, handleMouseMove, handleMouseUp]);
 
   // 默认规则模板
   const defaultRuleTemplates = [
@@ -1603,19 +1544,6 @@ const AnnotationRulesPanel = ({
   }, [textAnnotations]);
   const annotationTableScroll = React.useMemo(() => ({ x: 1600 }), []);
 
-  const batchFontTargets = React.useMemo(() => {
-    const selectedOnPage = textAnnotations.filter(annotation => selectedAnnotationIdSet.has(annotation.id));
-    return selectedOnPage.length > 0 ? selectedOnPage : textAnnotations;
-  }, [selectedAnnotationIdSet, textAnnotations]);
-
-  const batchCircleFrameTargets = React.useMemo(() => (
-    !visible ? [] : (Array.isArray(annotations) ? annotations : []).filter(annotation => (
-      annotation.borderShape === 'circle' ||
-      annotation.borderShape === 'split-circle' ||
-      annotation.borderShape === 'diamond'
-    ))
-  ), [annotations, visible]);
-
   const currentPageSplitCircleWelds = React.useMemo(() => (
     textAnnotations.filter(annotation => (
       annotation.borderShape === 'split-circle' &&
@@ -1739,160 +1667,23 @@ const AnnotationRulesPanel = ({
 
   const applyBatchSplitCircleContent = useCallback(() => {
     if (!splitCircleTargets.length || !onBatchAnnotationUpdates) return;
-    const diameter = String(batchDiameterText || '').trim();
-    const parsedRanges = parseWeldNumberRanges(batchDiameterRangeText);
-    if (!parsedRanges.valid) {
-      message.warning(`焊口号范围格式不正确：${parsedRanges.invalidParts.join('、')}`);
-      return;
-    }
-    const hasSelectedTargets = splitCircleTargets.some(annotation => selectedAnnotationIdSet.has(annotation.id));
-    if (
-      batchMaterialCandidates.diameters.length > 1 &&
-      !hasSelectedTargets &&
-      parsedRanges.ranges.length === 0
-    ) {
-      message.warning('当前页存在多种管子寸径，请先填写焊口号范围，或选中需要修改的焊口');
-      return;
-    }
-    const effectiveTargets = parsedRanges.ranges.length > 0
-      ? splitCircleTargets.filter(annotation => (
-        weldNumberInRanges(getAnnotationWeldNumber(annotation), parsedRanges.ranges)
-      ))
-      : splitCircleTargets;
-    if (effectiveTargets.length === 0) {
-      message.warning('指定范围内没有找到当前页焊口');
-      return;
-    }
-    const updatesById = {};
-    effectiveTargets.forEach(annotation => {
-      updatesById[annotation.id] = {
-        topText: diameter
-      };
-    });
-    onBatchAnnotationUpdates(
-      updatesById,
-      `批量修改当前页寸径 (${effectiveTargets.length}个${batchDiameterRangeText ? `，范围 ${batchDiameterRangeText}` : ''})`
-    );
-  }, [
-    batchDiameterText,
-    batchDiameterRangeText,
-    batchMaterialCandidates.diameters.length,
-    onBatchAnnotationUpdates,
-    selectedAnnotationIdSet,
-    splitCircleTargets,
-    textAnnotations
-  ]);
-
-  const applyBatchJointType = useCallback(() => {
-    if (!splitCircleTargets.length || !onBatchAnnotationUpdates) return;
-    const jointType = String(batchJointTypeText || '').trim();
-    if (!jointType) {
-      message.warning('请选择或填写接头类型');
-      return;
-    }
-    const updatesById = {};
-    splitCircleTargets.forEach(annotation => {
-      updatesById[annotation.id] = { jointTypeText: jointType };
-    });
-    onBatchAnnotationUpdates(
-      updatesById,
-      `批量填入当前页接头类型 ${jointType}（${splitCircleTargets.length}个）`
-    );
-  }, [batchJointTypeText, onBatchAnnotationUpdates, splitCircleTargets]);
-
-  const applyBatchFontSizes = useCallback(() => {
-    if (!batchFontTargets.length || !onBatchAnnotationUpdates) return;
-    const updatesById = {};
-    batchFontTargets.forEach(annotation => {
-      updatesById[annotation.id] = annotation.borderShape === 'split-circle'
-        ? { topFontSize: batchTopFontSize, bottomFontSize: batchBottomFontSize }
-        : { fontSize: batchRegularFontSize };
-    });
-    onBatchAnnotationUpdates(
-      updatesById,
-      `批量修改当前页标注字体 (${batchFontTargets.length}个)`
-    );
-  }, [
-    batchBottomFontSize,
-    batchFontTargets,
-    batchRegularFontSize,
-    batchTopFontSize,
-    onBatchAnnotationUpdates
-  ]);
-
-  const applyBatchAllPagesFontSizes = useCallback(async () => {
-    if (!batchCircleFrameTargets.length || !onBatchAnnotationUpdates) return;
-    const regularSize = Number(batchRegularFontSize);
-    const topSize = Number(batchTopFontSize);
-    const bottomSize = Number(batchBottomFontSize);
-    if (
-      !Number.isFinite(regularSize) || regularSize <= 0 ||
-      !Number.isFinite(topSize) || topSize <= 0 ||
-      !Number.isFinite(bottomSize) || bottomSize <= 0
-    ) {
-      message.warning('请输入有效的所有页字体大小');
-      return;
-    }
-    const pdfDocument = panelProps.pdfDocument;
-    if (!pdfDocument?.getPage) {
-      message.error('PDF页面尺寸尚未加载，请重新打开PDF后再试');
-      return;
-    }
-
-    setBatchAllPagesFontApplying(true);
     try {
-      const pageNumbers = Array.from(new Set(
-        batchCircleFrameTargets
-          .map(annotation => Number(annotation.page || 1))
-          .filter(page => Number.isFinite(page) && page > 0)
-      ));
-      const pageSizes = new Map();
-      let nextPageIndex = 0;
-      const workerCount = Math.min(6, pageNumbers.length);
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (nextPageIndex < pageNumbers.length) {
-          const pageIndex = nextPageIndex;
-          nextPageIndex += 1;
-          const pageNumber = pageNumbers[pageIndex];
-          const pdfPage = await pdfDocument.getPage(pageNumber);
-          const viewport = pdfPage.getViewport({ scale: 1 });
-          pageSizes.set(pageNumber, { width: viewport.width, height: viewport.height });
-        }
+      const hasSelectedTargets = splitCircleTargets.some(annotation => selectedAnnotationIdSet.has(annotation.id));
+      const updatesById = buildBatchSplitCircleContentUpdates({
+        targets: splitCircleTargets,
+        diameter: batchDiameterText,
+        jointType: batchJointTypeText,
+        rangeText: batchDiameterRangeText,
+        requireDiameterRange: batchMaterialCandidates.diameters.length > 1 && !hasSelectedTargets
       });
-      await Promise.all(workers);
-
-      const updatesById = {};
-      batchCircleFrameTargets.forEach(annotation => {
-        const pageNumber = Number(annotation.page || 1);
-        const pageSize = pageSizes.get(pageNumber);
-        if (annotation.borderShape === 'split-circle') {
-          updatesById[annotation.id] = {
-            topFontSize: scaleAnnotationValue(topSize, pageSize, topSize),
-            bottomFontSize: scaleAnnotationValue(bottomSize, pageSize, bottomSize)
-          };
-        } else {
-          updatesById[annotation.id] = {
-            fontSize: scaleAnnotationValue(regularSize, pageSize, regularSize)
-          };
-        }
-      });
-      onBatchAnnotationUpdates(
-        updatesById,
-        `按A3比例批量修改所有页标注字体 (${batchCircleFrameTargets.length}个)`
-      );
-    } catch (error) {
-      message.error(`读取PDF页面尺寸失败：${error.message}`);
-    } finally {
-      setBatchAllPagesFontApplying(false);
-    }
-  }, [
-    batchBottomFontSize,
-    batchCircleFrameTargets,
-    batchRegularFontSize,
-    batchTopFontSize,
-    onBatchAnnotationUpdates,
-    panelProps.pdfDocument
-  ]);
+      const count = Object.keys(updatesById).length;
+      if (!count) { message.info('所选焊口已使用该寸径和接头'); return; }
+      onBatchAnnotationUpdates(updatesById,
+        `批量填入当前页寸径与接头 (${count}个${batchDiameterRangeText ? `，范围 ${batchDiameterRangeText}` : ''})`);
+    } catch (error) { message.warning(error.message); }
+  }, [batchDiameterText, batchJointTypeText, batchDiameterRangeText,
+    batchMaterialCandidates.diameters.length, onBatchAnnotationUpdates,
+    selectedAnnotationIdSet, splitCircleTargets]);
 
   const commitInlineAnnotationField = useCallback((annotation, field, value) => {
     if (!annotation?.id || !onAnnotationUpdate) return;
@@ -2266,7 +2057,8 @@ const AnnotationRulesPanel = ({
             options={[
               { value: 'circle', label: '圆形' },
               { value: 'split-circle', label: '分栏圆形' },
-              { value: 'diamond', label: '矩形' },
+              { value: 'diamond', label: '菱形' },
+              { value: 'rectangle', label: '方形' },
               { value: 'text-rectangle', label: '长方形框' },
               { value: 'pipe-tag', label: '管段框' },
               { value: 'field-weld', label: '现场焊缝' },
@@ -2759,7 +2551,10 @@ const AnnotationRulesPanel = ({
 
   return (
     <>
-      <ResizeHandle ref={resizeHandleRef} $visible={visible} $width={panelWidth} $isResizing={isResizing} onMouseDown={handleMouseDown} />
+      <ResizeHandle $visible={visible} $width={panelWidth} $isResizing={isResizing}
+        role="button" tabIndex={0} aria-label="调整标注管理宽度" title="拖动调宽，点击展开或收起标注管理"
+        onMouseDown={event => startResize(event, 'width')}
+        onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onToggle?.(); } }} />
 
       <Modal
         title={
@@ -3046,7 +2841,8 @@ const AnnotationRulesPanel = ({
           >
             <Select style={{ width: '180px' }} placeholder="选择样式">
               <Select.Option value="none">无边框</Select.Option>
-              <Select.Option value="diamond">矩形</Select.Option>
+              <Select.Option value="diamond">菱形</Select.Option>
+              <Select.Option value="rectangle">方形</Select.Option>
               <Select.Option value="circle">圆形</Select.Option>
               <Select.Option value="split-circle">分栏圆形</Select.Option>
               <Select.Option value="text-rectangle">长方形框</Select.Option>
@@ -3095,8 +2891,8 @@ const AnnotationRulesPanel = ({
       </Modal>
 
       {visible && (
-        <PanelContainer $width={panelWidth} $visible={visible}>
-      <PanelHeader>
+        <PanelContainer ref={panelRef} data-annotation-management-panel $width={panelWidth} $visible={visible}>
+      <PanelHeader data-panel-header>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Title level={4} style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
             <SettingOutlined />
@@ -3106,7 +2902,7 @@ const AnnotationRulesPanel = ({
       </PanelHeader>
 
       {/* 上半部分：规则定义区域 */}
-      <RuleDefinitionSection>
+      <RuleDefinitionSection data-annotation-rules-section>
         <Title level={5} style={{ margin: '0 0 16px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <SettingOutlined />
           标注规则定义
@@ -3735,10 +3531,11 @@ const AnnotationRulesPanel = ({
         )}
       </RuleDefinitionSection>
 
+
       {/* 下半部分：标注信息表格 */}
       <AnnotationInfoSection>
         {/* 固定标题栏 */}
-        <AnnotationInfoHeader>
+        <AnnotationInfoTitle>
           <Title level={5} style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'space-between' }}>
             <Space>
               <FileTextOutlined />
@@ -3831,93 +3628,30 @@ const AnnotationRulesPanel = ({
               </Dropdown>
             )}
           </Title>
-          {textAnnotations.length > 0 && (
-            <Space wrap size={6} style={{ marginTop: 8 }}>
-              <span style={{ fontSize: 12, color: '#666' }}>
-                当前页字体（{batchFontTargets.length < textAnnotations.length ? `已选 ${batchFontTargets.length}` : `本页 ${textAnnotations.length}`}）：
-              </span>
-              <InputNumber
-                size="small"
-                min={6}
-                max={96}
-                value={batchTopFontSize}
-                onChange={value => setBatchTopFontSize(Number(value) || 16)}
-                addonBefore="上"
-                style={{ width: 92 }}
-              />
-              <InputNumber
-                size="small"
-                min={6}
-                max={96}
-                value={batchBottomFontSize}
-                onChange={value => setBatchBottomFontSize(Number(value) || 34)}
-                addonBefore="下"
-                style={{ width: 92 }}
-              />
-              <InputNumber
-                size="small"
-                min={6}
-                max={96}
-                value={batchRegularFontSize}
-                onChange={value => setBatchRegularFontSize(Number(value) || 34)}
-                addonBefore="普通"
-                style={{ width: 112 }}
-              />
-              <Button size="small" type="primary" onClick={applyBatchFontSizes}>
-                应用
-              </Button>
-            </Space>
-          )}
-          {batchCircleFrameTargets.length > 0 && (
-            <Space wrap size={6} style={{ marginTop: 6 }}>
-              <span style={{ fontSize: 12, color: '#666' }}>
-                所有页圆形/分栏圆形/菱形字体（框固定为A3打印10mm，共 {batchCircleFrameTargets.length} 个）：
-              </span>
-              <InputNumber
-                size="small"
-                min={6}
-                max={96}
-                value={batchTopFontSize}
-                onChange={value => setBatchTopFontSize(Number(value) || 16)}
-                addonBefore="上"
-                style={{ width: 92 }}
-                disabled={batchAllPagesFontApplying}
-              />
-              <InputNumber
-                size="small"
-                min={6}
-                max={96}
-                value={batchBottomFontSize}
-                onChange={value => setBatchBottomFontSize(Number(value) || 34)}
-                addonBefore="下"
-                style={{ width: 92 }}
-                disabled={batchAllPagesFontApplying}
-              />
-              <InputNumber
-                size="small"
-                min={6}
-                max={96}
-                value={batchRegularFontSize}
-                onChange={value => setBatchRegularFontSize(Number(value) || 34)}
-                addonBefore="普通"
-                style={{ width: 112 }}
-                disabled={batchAllPagesFontApplying}
-              />
-              <Button
-                size="small"
-                type="primary"
-                onClick={applyBatchAllPagesFontSizes}
-                loading={batchAllPagesFontApplying}
-              >
-                应用
-              </Button>
-            </Space>
-          )}
+        </AnnotationInfoTitle>
+        <AnnotationInfoHeader>
+          <BatchAnnotationFont
+            annotations={annotations}
+            currentPage={panelProps.currentPage || 1}
+            selectedIds={Array.from(selectedAnnotationIdSet)}
+            pdfDocument={panelProps.pdfDocument}
+            onBatchAnnotationUpdates={onBatchAnnotationUpdates}
+          />
+          <BatchAnnotationAppearance
+            annotations={annotations}
+            currentPage={panelProps.currentPage || 1}
+            selectedIds={Array.from(selectedAnnotationIdSet)}
+            pdfDocument={panelProps.pdfDocument}
+            onBatchAnnotationUpdates={onBatchAnnotationUpdates}
+          />
           {splitCircleTargets.length > 0 && (
             <Space wrap size={6} style={{ marginTop: 6 }}>
-              <span style={{ fontSize: 12, color: '#666' }}>
+              <BatchControlTitle tip={`${batchDiameterOptions.length
+                ? '寸径只读取材料表中的管子；默认取多数值，有选中项时只改选中项'
+                : '未读取到管子寸径；默认取当前页多数值，也可自行输入'}；范围同时作用于寸径和接头，未填写的项保持原值。${weldRangeAutoPending
+                  ? '停止标注5秒后自动统计焊口号范围。' : '焊口号范围已统计，可手动调整。'}`}>
                 批量内容（{splitCircleTargets.length < textAnnotations.length ? `已选 ${splitCircleTargets.length}` : `本页 ${splitCircleTargets.length}`}）：
-              </span>
+              </BatchControlTitle>
               <Space.Compact size="small">
                 <Button size="small" disabled style={{ color: '#555' }}>寸径</Button>
                 <Select
@@ -3965,26 +3699,15 @@ const AnnotationRulesPanel = ({
                 allowClear
                 style={{ minWidth: 260 }}
               />
-              <Tag color={weldRangeAutoPending ? 'processing' : 'success'}>
-                {weldRangeAutoPending ? '停止标注5秒后自动统计范围' : '焊口号范围已统计'}
-              </Tag>
               <Button size="small" type="primary" onClick={applyBatchSplitCircleContent}>
-                填入寸径
+                填入
               </Button>
-              <Button size="small" type="primary" onClick={applyBatchJointType}>
-                填入接头
-              </Button>
-              <span style={{ fontSize: 11, color: '#999' }}>
-                {batchDiameterOptions.length
-                  ? '寸径只读取材料表中的管子；默认取多数值，有选中项时只改选中项'
-                  : '未读取到管子寸径；默认取当前页多数值，也可自行输入'}；接头类型同样优先作用于选中焊口
-              </span>
             </Space>
           )}
         </AnnotationInfoHeader>
 
         {/* 可滚动的表格容器 */}
-        <AnnotationTableContainer>
+        <AnnotationTableContainer ref={annotationTableContainerRef} data-annotation-table-container>
           {textAnnotations.length === 0 ? (
             <div style={{ textAlign: 'center', color: '#999', padding: '40px 0' }}>
               <InfoCircleOutlined style={{ fontSize: '32px', marginBottom: '12px', display: 'block' }} />
@@ -4064,6 +3787,7 @@ export default React.memo(AnnotationRulesPanel, (prevProps, nextProps) => {
     continuousNumber: prevProps.continuousNumber === nextProps.continuousNumber,
     materialRows: prevProps.materialRows === nextProps.materialRows,
     currentPage: prevProps.currentPage === nextProps.currentPage,
+    pdfDocument: prevProps.pdfDocument === nextProps.pdfDocument,
     annotations: !nextProps.visible || prevProps.annotations === nextProps.annotations,
     currentPageAnnotations: !nextProps.visible || (
       prevProps.currentPageAnnotations === nextProps.currentPageAnnotations &&

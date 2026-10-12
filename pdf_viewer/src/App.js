@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import styled from 'styled-components';
 import { ConfigProvider, message, Modal, Form, Input, InputNumber, Button } from 'antd';
 import { ExclamationCircleOutlined } from '@ant-design/icons';
@@ -9,7 +9,8 @@ import ProgressModal from './components/ProgressModal';
 import PdfExportProgress from './components/PdfExportProgress';
 import { getPdfExportProgress, publishPdfExportProgress } from './utils/pdfExportProgress';
 import { savePdfWithTimeBudget } from './utils/pdfSerialization';
-import { buildAnnotationMoveTransaction, applyAnnotationMovePatches } from './utils/annotationMoveTransaction';
+import { buildAnnotationMoveTransaction, applyAnnotationMovePatches, getAnnotationMovePages } from './utils/annotationMoveTransaction';
+import { getSquareLeaderConnection } from './utils/squareLeaderConnection';
 import AnnotationRulesPanel from './components/AnnotationRulesPanel';
 import StatsPanel from './components/StatsPanel';
 import H3yunUploadModal from './components/H3yunUploadModal';
@@ -31,6 +32,7 @@ import './App.css';
 import { isElectron, logPlatformInfo } from './utils/platformDetect';
 import { fileAdapter } from './adapters/fileAdapter';
 import { configAdapter } from './adapters/configAdapter';
+import { createBoundedDraftScheduler } from './utils/boundedDraftScheduler';
 import {
   buildPdfDraftFileInfo,
   clearLatestAnnotationDraft,
@@ -52,10 +54,8 @@ import {
   isSupportSectionHeader
 } from './utils/scaffoldRecognitionUtils';
 import {
-  FRAME_SIZE_MODE_AUTO_A3,
   getFixedA3TenMmFrameSize,
-  getAnnotationFrameSizeMode,
-  resolveAnnotationFrameSize,
+  isFixedA3TenMmShape,
   scaleAnnotationValue
 } from './utils/pageAnnotationScale';
 import { getNextPipeSegmentLabel } from './utils/pipeSegmentUtils';
@@ -70,6 +70,8 @@ import {
   getPageAnnotations
 } from './utils/pageAnnotationIndex';
 import {
+  DEFAULT_TEXT_RECTANGLE_FRAME_SIZE,
+  getAnnotationFrameSize,
   normalizeTextRectangleAnnotation,
   normalizeTextRectangleAnnotations
 } from './utils/textRectangleFrame';
@@ -630,19 +632,10 @@ function AppContent() {
   const [annotationFontSize, setAnnotationFontSize] = useState(34); // 默认字体大小为34px
   const [annotationTopFontSize, setAnnotationTopFontSize] = useState(16);
   const [annotationBottomFontSize, setAnnotationBottomFontSize] = useState(34);
-  const [annotationFrameSize, setAnnotationFrameSize] = useState(100); // 固定 px 模式的默认框尺寸
-  const [annotationFrameSizeMode, setAnnotationFrameSizeMode] = useState(FRAME_SIZE_MODE_AUTO_A3);
+  const [annotationFrameSize, setAnnotationFrameSize] = useState(56.7); // 默认框大小对角线
   const [annotationBorderShape, setAnnotationBorderShape] = useState('circle'); // 默认圆形边框
   const [annotationPipeTagRotation, setAnnotationPipeTagRotation] = useState(0);
   const [annotationPipeTagZeroPadCount, setAnnotationPipeTagZeroPadCount] = useState(0);
-  const resolveConfiguredFrameSize = useCallback((targetPageSize, annotation = null) => (
-    resolveAnnotationFrameSize({
-      annotation: annotation || { frameSize: annotationFrameSize, frameSizeMode: annotationFrameSizeMode },
-      pageSize: targetPageSize,
-      fallbackMode: annotationFrameSizeMode,
-      fallbackSize: annotationFrameSize
-    })
-  ), [annotationFrameSize, annotationFrameSizeMode]);
   
   // 用于存储来自AnnotationRulesPanel的handleEditAnnotation函数引用
   const annotationEditHandlerRef = useRef(null);
@@ -700,7 +693,9 @@ function AppContent() {
   const latestAutoBatchAnnotationRef = useRef(null);
   const previouslyIndexedAnnotationsRef = useRef([]);
   const startupDraftPromptShownRef = useRef(false);
-  const cloudAnnotationDraftTimerRef = useRef(null);
+  const cloudAnnotationDraftSchedulerRef = useRef(null);
+  const cloudAnnotationDraftGenerationRef = useRef(0);
+  const localAnnotationDraftPendingSinceRef = useRef(null);
   const cloudAnnotationDraftInFlightRef = useRef(null);
   const latestCloudAnnotationDraftRef = useRef(null);
   const cloudAnnotationDraftErrorShownRef = useRef(false);
@@ -763,6 +758,9 @@ function AppContent() {
   }, [markAnnotationDraftDirty]);
 
   const resetAnnotationDraftState = useCallback(() => {
+    cloudAnnotationDraftGenerationRef.current += 1;
+    cloudAnnotationDraftSchedulerRef.current?.cancel();
+    localAnnotationDraftPendingSinceRef.current = null;
     annotationDraftDirtyRef.current = false;
     annotationDraftSaveErrorShownRef.current = false;
     latestAnnotationDraftRef.current = null;
@@ -779,10 +777,6 @@ function AppContent() {
       clearTimeout(annotationDraftFlushTimerRef.current);
       annotationDraftFlushTimerRef.current = null;
     }
-    if (cloudAnnotationDraftTimerRef.current) {
-      clearTimeout(cloudAnnotationDraftTimerRef.current);
-      cloudAnnotationDraftTimerRef.current = null;
-    }
   }, []);
 
   const persistCloudAnnotationDraft = useCallback((draftToSave) => {
@@ -797,14 +791,21 @@ function AppContent() {
     }
 
     setCloudAnnotationDraftStatus('saving');
+    cloudAnnotationDraftSchedulerRef.current?.cancel();
+    const generation = cloudAnnotationDraftGenerationRef.current;
 
-    const runSave = (currentDraft) => saveCloudAnnotationDraftOffMainThread(currentDraft)
+    const runSave = (currentDraft) => {
+      let failed = false;
+      return saveCloudAnnotationDraftOffMainThread(currentDraft)
       .then((result) => {
+        if (generation !== cloudAnnotationDraftGenerationRef.current) return result;
         cloudAnnotationDraftErrorShownRef.current = false;
         setCloudAnnotationDraftStatus('saved');
         return result;
       })
       .catch((error) => {
+        failed = true;
+        if (generation !== cloudAnnotationDraftGenerationRef.current) return null;
         console.warn('保存云端标注草稿失败:', error);
         setCloudAnnotationDraftStatus('error');
         if (error?.status === 404) {
@@ -816,16 +817,25 @@ function AppContent() {
             : '云端标注草稿保存失败，本机草稿仍已保存');
           cloudAnnotationDraftErrorShownRef.current = true;
         }
+        if (error?.status !== 404) {
+          cloudAnnotationDraftSchedulerRef.current?.retry(latestCloudAnnotationDraftRef.current || currentDraft, 60000);
+        }
         return null;
       })
       .finally(() => {
         const pendingDraft = latestCloudAnnotationDraftRef.current;
-        if (pendingDraft && pendingDraft !== currentDraft) {
+        if (!failed && pendingDraft && pendingDraft !== currentDraft && generation === cloudAnnotationDraftGenerationRef.current) {
+          cloudAnnotationDraftSchedulerRef.current?.cancel();
           cloudAnnotationDraftInFlightRef.current = runSave(pendingDraft);
           return cloudAnnotationDraftInFlightRef.current;
         }
         cloudAnnotationDraftInFlightRef.current = null;
+        // A previous document's request may finish after a new document opens.
+        if (pendingDraft && generation !== cloudAnnotationDraftGenerationRef.current) {
+          cloudAnnotationDraftSchedulerRef.current?.schedule(pendingDraft, 0);
+        }
       });
+    };
 
     cloudAnnotationDraftInFlightRef.current = runSave(draftToSave);
     return cloudAnnotationDraftInFlightRef.current;
@@ -839,14 +849,22 @@ function AppContent() {
     latestCloudAnnotationDraftRef.current = draft;
     setCloudAnnotationDraftStatus('saving');
 
-    if (cloudAnnotationDraftTimerRef.current) {
-      clearTimeout(cloudAnnotationDraftTimerRef.current);
+    if (!cloudAnnotationDraftSchedulerRef.current) {
+      cloudAnnotationDraftSchedulerRef.current = createBoundedDraftScheduler(persistCloudAnnotationDraft);
     }
+    cloudAnnotationDraftSchedulerRef.current.schedule(draft);
+  }, [persistCloudAnnotationDraft]);
 
-    cloudAnnotationDraftTimerRef.current = setTimeout(() => {
-      cloudAnnotationDraftTimerRef.current = null;
-      persistCloudAnnotationDraft(latestCloudAnnotationDraftRef.current);
-    }, 8000);
+  useEffect(() => {
+    const retry = () => {
+      const draft = latestCloudAnnotationDraftRef.current;
+      if (draft) persistCloudAnnotationDraft(draft);
+    };
+    window.addEventListener('online', retry);
+    return () => {
+      window.removeEventListener('online', retry);
+      cloudAnnotationDraftSchedulerRef.current?.cancel();
+    };
   }, [persistCloudAnnotationDraft]);
 
   const discardLatestAnnotationDraft = useCallback(async () => {
@@ -873,15 +891,10 @@ function AppContent() {
     if (annotationDraftSaveInFlightRef.current) {
       await annotationDraftSaveInFlightRef.current;
     }
-    if (cloudAnnotationDraftTimerRef.current) {
-      clearTimeout(cloudAnnotationDraftTimerRef.current);
-      cloudAnnotationDraftTimerRef.current = null;
-      if (latestCloudAnnotationDraftRef.current) {
-        await persistCloudAnnotationDraft(latestCloudAnnotationDraftRef.current);
-      }
-    }
-    if (cloudAnnotationDraftInFlightRef.current) {
-      await cloudAnnotationDraftInFlightRef.current;
+    if (latestCloudAnnotationDraftRef.current) {
+      const cloudResult = await persistCloudAnnotationDraft(latestCloudAnnotationDraftRef.current);
+      // A failed cloud save must retain the recovery checkpoint and its retry.
+      if (!cloudResult) return;
     }
     resetAnnotationDraftState();
     try {
@@ -900,6 +913,7 @@ function AppContent() {
     ) {
       return null;
     }
+    localAnnotationDraftPendingSinceRef.current = null;
 
     const project = getCurrentProjectContext();
     const draft = {
@@ -1018,10 +1032,13 @@ function AppContent() {
       clearTimeout(annotationDraftFlushTimerRef.current);
     }
 
+    if (localAnnotationDraftPendingSinceRef.current === null) {
+      localAnnotationDraftPendingSinceRef.current = Date.now();
+    }
     annotationDraftFlushTimerRef.current = setTimeout(() => {
       annotationDraftFlushTimerRef.current = null;
       flushAnnotationDraft();
-    }, 2000);
+    }, Math.max(0, Math.min(2000, 10000 - (Date.now() - localAnnotationDraftPendingSinceRef.current))));
 
     return () => {
       if (annotationDraftFlushTimerRef.current) {
@@ -3801,7 +3818,7 @@ function AppContent() {
     const simplifiedNumber = `S${existingScaffoldCount + 1}`;
     const annotationPageSize = { width: pageWidth, height: pageHeight };
     const scaledFontSize = scaleAnnotationValue(annotationFontSize, annotationPageSize, 34);
-    const scaledFrameSize = resolveConfiguredFrameSize(annotationPageSize);
+    const scaledFrameSize = scaleAnnotationValue(annotationFrameSize || 56.7, annotationPageSize, 56.7);
     
     const newAnnotation = {
       id: Date.now().toString(),
@@ -3816,7 +3833,6 @@ function AppContent() {
       borderShape: 'diamond', // 使用菱形
       fontSize: scaledFontSize,
       frameSize: scaledFrameSize,
-      frameSizeMode: annotationFrameSizeMode,
       ruleId: null, // 支架标注不使用规则
       materialNumber: '', // 初始为空
       scaffoldNumber: scaffoldInfo.text, // 保存原始支架编号
@@ -4111,7 +4127,7 @@ function AppContent() {
 
         const annotationPageSize = { width: pageWidth, height: pageHeight };
         const scaledFontSize = scaleAnnotationValue(annotationFontSize, annotationPageSize, 34);
-        const scaledFrameSize = resolveConfiguredFrameSize(annotationPageSize);
+        const scaledFrameSize = scaleAnnotationValue(annotationFrameSize || 56.7, annotationPageSize, 56.7);
         
         if (itemInfo.isValve) {
           // ========== 阀门标注 ==========
@@ -4130,7 +4146,6 @@ function AppContent() {
             borderShape: 'diamond',
             fontSize: scaledFontSize,
             frameSize: scaledFrameSize,
-            frameSizeMode: annotationFrameSizeMode,
             ruleId: null,
             materialNumber: '',
             valveNumber: itemInfo.originalText,
@@ -4161,7 +4176,6 @@ function AppContent() {
             borderShape: 'diamond',
             fontSize: scaledFontSize,
             frameSize: scaledFrameSize,
-            frameSizeMode: annotationFrameSizeMode,
             ruleId: null,
             materialNumber: '',
             scaffoldNumber: itemInfo.originalText,
@@ -4241,7 +4255,7 @@ function AppContent() {
     const pageHeight = pageSize?.height || pageData?.pageInfo?.page_height || 841;
     const annotationPageSize = { width: pageWidth, height: pageHeight };
     const scaledFontSize = scaleAnnotationValue(annotationFontSize, annotationPageSize, 34);
-    const scaledFrameSize = resolveConfiguredFrameSize(annotationPageSize);
+    const scaledFrameSize = scaleAnnotationValue(annotationFrameSize || 56.7, annotationPageSize, 56.7);
     
     console.log('📏 批量标注 - 使用的页面尺寸:', { width: pageWidth, height: pageHeight });
     
@@ -4296,7 +4310,6 @@ function AppContent() {
         borderShape: 'diamond',
         fontSize: scaledFontSize,
         frameSize: scaledFrameSize,
-        frameSizeMode: annotationFrameSizeMode,
         ruleId: null,
         materialNumber: '',
         scaffoldNumber: scaffoldInfo.text,    // 保存原始支架编号
@@ -4333,7 +4346,6 @@ function AppContent() {
         borderShape: 'diamond',
         fontSize: scaledFontSize,
         frameSize: scaledFrameSize,
-        frameSizeMode: annotationFrameSizeMode,
         ruleId: null,
         materialNumber: '',
         valveNumber: valveInfo.text,          // 保存阀门编号
@@ -4383,8 +4395,7 @@ function AppContent() {
     // 补点虽然通过多页批量界面生成，但业务来源仍是人工新增。
     const incomingAnnotations = newAnnotations.map(ann => ({
       ...ann,
-      frameSize: ann.frameSize ?? (annotationFrameSize || 100),
-      frameSizeMode: ann.frameSizeMode || annotationFrameSizeMode,
+      frameSize: ann.frameSize ?? (annotationFrameSize || 56.7),
       origin: isManualInsertedAnnotation(ann) ? 'manual' : 'auto',
       qualityCorrection: isManualInsertedAnnotation(ann),
       qualityModified: ann.qualityModified === true,
@@ -4882,31 +4893,26 @@ function AppContent() {
   // 键盘快捷键处理
   useEffect(() => {
     const handleKeyDown = (event) => {
+      // 检查是否在输入框中，如果是则不处理快捷键
       const activeElement = document.activeElement;
       const isInputElement = activeElement && (
         activeElement.tagName === 'INPUT' || 
         activeElement.tagName === 'TEXTAREA' || 
         activeElement.contentEditable === 'true'
       );
+
+      if (isInputElement) {
+        return;
+      }
+
       // 处理快捷键，忽略大小写
       // 使用 event.key.toLowerCase() 和 event.code 双重判断，确保在所有情况下都不区分大小写
       const key = event.key.toLowerCase();
       const code = event.code; // 物理按键代码，不受大小写影响
-      const isFrameSizeControl = Boolean(activeElement?.closest?.('.annotation-frame-size-control'));
-      const isUndoShortcut = event.ctrlKey && (key === 'z' || code === 'KeyZ') && !event.shiftKey;
-      const isRedoShortcut = (
-        (event.ctrlKey && (key === 'y' || code === 'KeyY')) ||
-        (event.ctrlKey && event.shiftKey && (key === 'z' || code === 'KeyZ'))
-      );
 
       // Ctrl+Z: 撤销
-      // 框大小控件获得焦点时仍撤销标注；普通输入框保留自身的文字撤销行为。
-      if (isUndoShortcut && (!isInputElement || isFrameSizeControl)) {
+      if (event.ctrlKey && (key === 'z' || code === 'KeyZ') && !event.shiftKey) {
         event.preventDefault();
-        if (isFrameSizeControl) {
-          activeElement?.blur?.();
-          document.body?.focus?.();
-        }
         if (undoRedoSystem.canUndo) {
           handleUndo();
         }
@@ -4914,20 +4920,11 @@ function AppContent() {
       }
 
       // Ctrl+Y 或 Ctrl+Shift+Z: 重做
-      if (isRedoShortcut && (!isInputElement || isFrameSizeControl)) {
+      if ((event.ctrlKey && (key === 'y' || code === 'KeyY')) || (event.ctrlKey && event.shiftKey && (key === 'z' || code === 'KeyZ'))) {
         event.preventDefault();
-        if (isFrameSizeControl) {
-          activeElement?.blur?.();
-          document.body?.focus?.();
-        }
         if (undoRedoSystem.canRedo) {
           handleRedo();
         }
-        return;
-      }
-
-      // 其他输入控件继续使用自身的键盘输入和编辑快捷键。
-      if (isInputElement) {
         return;
       }
 
@@ -5633,11 +5630,12 @@ function AppContent() {
 
     // 更新PDF状态
     const fileName = file instanceof File ? file.name.replace(/\.pdf$/i, '') : '';
-    if (!isElectron() && !options.preserveDraft) {
-      await discardLatestAnnotationDraft();
-    } else {
-      resetAnnotationDraftState();
-    }
+    // Inspect recovery data before resetting runtime state; opening a PDF is
+    // not consent to discard an interrupted browser download's checkpoint.
+    const openingDraft = !isElectron() && !options.preserveDraft
+      ? await loadLatestAnnotationDraft()
+      : options.localDraft || null;
+    resetAnnotationDraftState();
 
     setPdfFile(file);
     setPdfFileName(fileName);
@@ -5728,7 +5726,19 @@ function AppContent() {
     // 尝试从PDF元数据中加载标注信息
     const pdfAnnotationResult = await loadAnnotationsFromPDFMetadata(file);
     if (!options.skipCloudDraftPrompt && currentPdfDraftInfoRef.current) {
-      await maybeRestoreCloudAnnotationDraft(currentPdfDraftInfoRef.current, pdfAnnotationResult, options.localDraft || null);
+      const matchingLocalDraft = isSamePdfDraftFile(openingDraft?.fileInfo, currentPdfDraftInfoRef.current)
+        ? openingDraft : null;
+      const restoredCloud = await maybeRestoreCloudAnnotationDraft(currentPdfDraftInfoRef.current, pdfAnnotationResult, matchingLocalDraft);
+      if (!restoredCloud && matchingLocalDraft && getDraftUpdatedTime(matchingLocalDraft) > getDraftUpdatedTime(pdfAnnotationResult)) {
+        await new Promise(resolve => Modal.confirm({
+          title: '发现可恢复的本机标注草稿',
+          content: `找到 ${matchingLocalDraft.annotations.length} 条标注。下载可能未完成，是否恢复这份草稿？`,
+          okText: '恢复本机草稿',
+          cancelText: '保留 PDF 标注',
+          onOk: () => { restoreAnnotationDraftData(matchingLocalDraft, '本机草稿'); resolve(); },
+          onCancel: () => resolve(),
+        }));
+      }
     }
 
     // 性能监控：记录加载时间
@@ -5739,7 +5749,7 @@ function AppContent() {
 
     // 更新性能引用
     performanceRef.current.lastUpdateTime = Date.now();
-  }, [discardLatestAnnotationDraft, loadAnnotationsFromPDFMetadata, maybeRestoreCloudAnnotationDraft, performanceRef, resetAnnotationDraftState, undoRedoSystem, warnIfPdfEncrypted]);
+  }, [getDraftUpdatedTime, restoreAnnotationDraftData, loadAnnotationsFromPDFMetadata, maybeRestoreCloudAnnotationDraft, performanceRef, resetAnnotationDraftState, undoRedoSystem, warnIfPdfEncrypted]);
 
   const requestH3yunProxy = useCallback(async (requestData) => {
     if (window.electronAPI && window.electronAPI.tritiumUpload) {
@@ -6303,8 +6313,9 @@ function AppContent() {
       timestamp: annotation.timestamp || new Date().toISOString(),
       type: 'text', // 固定为文字标注
       color: annotationColor,
-      frameSize: annotation.frameSize ?? (annotationFrameSize || 100),
-      frameSizeMode: annotation.frameSizeMode || annotationFrameSizeMode,
+      frameSize: annotation.borderShape === 'text-rectangle'
+        ? DEFAULT_TEXT_RECTANGLE_FRAME_SIZE
+        : (annotation.frameSize ?? (annotationFrameSize || 56.7)),
       isUploaded: false, // 新添加的标注默认未上传
       origin: 'manual',
       batchRunId: annotation.batchRunId || latestAutoBatchAnnotation?.batchRunId || null,
@@ -6367,13 +6378,15 @@ function AppContent() {
   }, [annotationColor, annotationFrameSize, undoRedoSystem, annotationMode, logAuditEvent, currentPage, markAnnotationDraftDirty]);
 
   const applyCommittedAnnotationMoves = useCallback(patches => {
-    markAnnotationDraftDirty();
+    const pages = getAnnotationMovePages(patches, annotationPageIndexRef.current?.byId);
+    if (pages.length) markAnnotationDraftDirty(pages);
     setAnnotations(current => applyAnnotationMovePatches(current, patches));
   }, [markAnnotationDraftDirty]);
 
   const handleAnnotationMoveCommit = useCallback(moves => {
     const { before, after, changedAnnotations } = buildAnnotationMoveTransaction(
-      annotationsRef.current, moves, annotation => getAnnotationOrigin(annotation) === 'auto'
+      annotationsRef.current, moves, annotation => getAnnotationOrigin(annotation) === 'auto',
+      annotationPageIndexRef.current?.byId
     );
     if (!after.size) return;
     undoRedoSystem.executeCommand({
@@ -6701,8 +6714,7 @@ function AppContent() {
     const updateMap = new Map(updateEntries);
     const manualAdditions = plan.additions.map(annotation => ({
       ...annotation,
-      frameSize: annotation.frameSize ?? (annotationFrameSize || 100),
-      frameSizeMode: annotation.frameSizeMode || annotationFrameSizeMode,
+      frameSize: annotation.frameSize ?? (annotationFrameSize || 56.7),
       origin: 'manual',
       qualityCorrection: true,
       qualityModified: false,
@@ -7170,6 +7182,10 @@ function AppContent() {
   // 自动保存到原文件
   const handleAutoSaveToOriginalFile = async () => {
     try {
+      if (!isElectron()) {
+        markAnnotationDraftDirty();
+        await flushAnnotationDraft({ emergency: true });
+      }
       const t0 = performance.now();
       message.loading({ content: '正在保存PDF...', key: 'quickSave' });
 
@@ -7220,7 +7236,12 @@ function AppContent() {
         const t3 = performance.now();
         console.log(`🎉 保存完成，总耗时: ${(t3 - t0).toFixed(2)}ms`);
 
-        await markAnnotationDraftSaved();
+        if (isElectron() || result.saveMethod === 'original' || result.saveMethod === 'save-as') {
+          await markAnnotationDraftSaved();
+        } else if (latestCloudAnnotationDraftRef.current) {
+          // Download completion is invisible to the page. Keep recovery data.
+          persistCloudAnnotationDraft(latestCloudAnnotationDraftRef.current);
+        }
         logLayoutQualityFinalization('quick_save');
         logAnnotationSnapshot('quick_save');
         let successMessage;
@@ -7236,7 +7257,7 @@ function AppContent() {
         
         if (!isElectron() && result.saveMethod === 'download') {
           const reason = result.fallbackReason ? `原因：${result.fallbackReason}。` : '';
-          successMessage = `${reason}文件已下载：${result.savedPath || defaultFileName}，未写回原 PDF，请用下载的文件替换原文件`;
+          successMessage = `${reason}已发起下载：${result.savedPath || defaultFileName}，请检查下载列表；恢复草稿已保留`;
         }
         message.success({ content: successMessage, key: 'quickSave' });
       } else {
@@ -7370,8 +7391,9 @@ function AppContent() {
         timestamp: annotation.timestamp || new Date().toISOString(),
         type: 'text',
         color: annotationColor,
-        frameSize: annotation.frameSize ?? (annotationFrameSize || 100),
-        frameSizeMode: annotation.frameSizeMode || annotationFrameSizeMode,
+        frameSize: annotation.borderShape === 'text-rectangle'
+          ? DEFAULT_TEXT_RECTANGLE_FRAME_SIZE
+          : (annotation.frameSize ?? (annotationFrameSize || 56.7)),
         isUploaded: false, // 新添加的标注默认未上传
         origin: 'manual',
         batchRunId: annotation.batchRunId || latestAutoBatchAnnotation?.batchRunId || null,
@@ -7483,13 +7505,15 @@ function AppContent() {
     
     // 设置选中的标注并添加高亮效果
     setSelectedAnnotation(annotation.id);
-    setSelectedAnnotationIds([annotation.id]);
+    setSelectedAnnotationIds(previous => previous.length === 1 && previous[0] === annotation.id
+      ? previous : [annotation.id]);
     lastSelectedAnnotationIdRef.current = annotation.id;
   }, []);
 
   const handleAnnotationSelectionChange = useCallback((annotationIds = []) => {
     const nextIds = Array.from(new Set(annotationIds.filter(Boolean)));
-    setSelectedAnnotationIds(nextIds);
+    setSelectedAnnotationIds(previous => previous.length === nextIds.length &&
+      previous.every((id, index) => id === nextIds[index]) ? previous : nextIds);
     if (nextIds.length === 0) {
       setSelectedAnnotation(null);
       return;
@@ -7551,6 +7575,7 @@ function AppContent() {
       setAnnotationFontSize(28);
     } else if (shape === 'text-rectangle') {
       setAnnotationFontSize(34);
+      setAnnotationFrameSize(57);
     }
   }, []);
 
@@ -8541,14 +8566,8 @@ function AppContent() {
   // 计算标注大小的函数（与PDFViewer.js保持一致）
   const calculateAnnotationSize = (text, fontSize = 34, annotation = null) => { // 修改默认字体大小为34px
     text = String(text || '');
-    const frameSizeMode = getAnnotationFrameSizeMode(annotation, annotationFrameSizeMode);
-    const fixedA3Shape = frameSizeMode === FRAME_SIZE_MODE_AUTO_A3;
-    const baseFrameSize = resolveAnnotationFrameSize({
-      annotation,
-      pageSize: annotation?._framePageSize,
-      fallbackMode: annotationFrameSizeMode,
-      fallbackSize: annotationFrameSize
-    });
+    const fixedA3Shape = isFixedA3TenMmShape(annotation?.borderShape);
+    const baseFrameSize = getAnnotationFrameSize(annotation, annotationFrameSize || 56.7);
 
     // 计算文本的显示宽度（考虑中英文字符）
     const getTextWidth = (text, fontSize) => {
@@ -8701,29 +8720,7 @@ function AppContent() {
         break;
         
       case 'rectangle':
-        const rectVertices = [
-          { x: annotation.endX - shapeSize, y: annotation.endY - shapeSize },
-          { x: annotation.endX + shapeSize, y: annotation.endY - shapeSize },
-          { x: annotation.endX + shapeSize, y: annotation.endY + shapeSize },
-          { x: annotation.endX - shapeSize, y: annotation.endY + shapeSize }
-        ];
-        
-        let closestRectVertex = rectVertices[0];
-        let minRectDistance = Infinity;
-        
-        rectVertices.forEach(vertex => {
-          const distance = Math.sqrt(
-            Math.pow(vertex.x - annotation.startX, 2) + 
-            Math.pow(vertex.y - annotation.startY, 2)
-          );
-          if (distance < minRectDistance) {
-            minRectDistance = distance;
-            closestRectVertex = vertex;
-          }
-        });
-        
-        connectionX = closestRectVertex.x;
-        connectionY = closestRectVertex.y;
+        ({ connectionX, connectionY } = getSquareLeaderConnection(annotation, shapeSize));
         break;
 
       case 'text-rectangle':
@@ -9096,13 +9093,13 @@ function AppContent() {
               // 处理文字缩放逻辑
               let fontSize = annotation.fontSize || 34; // 与PDFViewer.js保持一致的默认值
               let displayText = annotation.text || '';
-              // 自动模式在导出时按当前页尺寸重新换算，确保整页适配 A3 后
-              // 各种框型都保持约 10 mm；固定模式直接使用保存的 px 值。
-              const annotationForSizing = getAnnotationFrameSizeMode(annotation, annotationFrameSizeMode) === FRAME_SIZE_MODE_AUTO_A3
+              // 圆形和菱形标注不采用项目自定义框尺寸。标注坐标使用
+              // 2x PDF 坐标系，因此这里保存的直径/对角线在整页适配到
+              // A3打印后严格等于10mm。
+              const annotationForSizing = isFixedA3TenMmShape(annotation.borderShape)
                 ? {
                     ...annotation,
-                    frameSize: getFixedA3TenMmFrameSize({ width: exportWidth, height: exportHeight }),
-                    frameSizeMode: 'fixed-px'
+                    frameSize: getFixedA3TenMmFrameSize({ width: exportWidth, height: exportHeight })
                   }
                 : annotation;
               
@@ -9201,7 +9198,7 @@ function AppContent() {
                     shapeSizeForConnection = sizes.diamondRadius; // 不应用coordinateScale
                     break;
                   case 'rectangle':
-                    shapeSizeForConnection = sizes.rectangleHalfSide * Math.sqrt(2); // 不应用coordinateScale
+                    shapeSizeForConnection = sizes.rectangleHalfSide; // 与实际绘制半边长一致
                     break;
                   case 'text-rectangle':
                     shapeSizeForConnection = {
@@ -10621,6 +10618,10 @@ function AppContent() {
     };
     try {
       const t0 = performance.now();
+      if (!isElectron()) {
+        markAnnotationDraftDirty();
+        await flushAnnotationDraft({ emergency: true });
+      }
       await new Promise(resolve => setTimeout(resolve, 0));
       
       // 生成基础文件名
@@ -10649,7 +10650,7 @@ function AppContent() {
       // Wait for the browser to accept the download, then remove every strong
       // reference before starting the much heavier annotated export.
       await new Promise(resolve => setTimeout(resolve, 150));
-      URL.revokeObjectURL(editableUrl);
+      setTimeout(() => URL.revokeObjectURL(editableUrl), 60000);
       editableLink.remove();
       editablePdfBytes = null;
       editableBlob = null;
@@ -10658,7 +10659,7 @@ function AppContent() {
       if (!includeAnnotatedVersion) {
         const t3 = performance.now();
         console.log(`🎉 可编辑版PDF导出完成，总耗时: ${(t3 - t0).toFixed(2)}ms`);
-        await markAnnotationDraftSaved();
+        if (latestCloudAnnotationDraftRef.current) persistCloudAnnotationDraft(latestCloudAnnotationDraftRef.current);
         logLayoutQualityFinalization('pdf_export');
         logAnnotationSnapshot('pdf_export');
         publishPdfExportProgress({
@@ -10667,7 +10668,7 @@ function AppContent() {
           status: '可编辑版 PDF 已生成并交给浏览器下载，请查看浏览器下载列表。'
         });
         message.success({
-          content: 'PDF导出成功！已生成可编辑版（含元数据附件，可继续编辑）。',
+          content: '已生成可编辑版并发起下载，请检查下载列表；恢复草稿已保留。',
           key: 'exportPdf',
           duration: 5
         });
@@ -10699,17 +10700,17 @@ function AppContent() {
       setTimeout(() => {
         URL.revokeObjectURL(annotatedLink.href);
         annotatedLink.remove();
-      }, 150);
+      }, 60000);
       
       const t5 = performance.now();
       console.log(`🎉 所有PDF导出完成，总耗时: ${(t5 - t0).toFixed(2)}ms`);
       
-      await markAnnotationDraftSaved();
+      if (latestCloudAnnotationDraftRef.current) persistCloudAnnotationDraft(latestCloudAnnotationDraftRef.current);
       logLayoutQualityFinalization('pdf_export');
       logAnnotationSnapshot('pdf_export');
       publishPdfExportProgress({ percent: 100, done: true, status: '两份 PDF 已生成并交给浏览器下载，请查看浏览器下载列表。' });
       message.success({ 
-        content: 'PDF导出成功！已生成2份文件：标注版（含渲染图像）和可编辑版（含元数据附件，可继续编辑）', 
+        content: '已生成标注版和可编辑版并发起下载，请检查下载列表；恢复草稿已保留。',
         key: 'exportPdf',
         duration: 5
       });
@@ -10926,8 +10927,6 @@ function AppContent() {
           onAnnotationBottomFontSizeChange={setAnnotationBottomFontSize}
           annotationFrameSize={annotationFrameSize}
           onAnnotationFrameSizeChange={setAnnotationFrameSize}
-          annotationFrameSizeMode={annotationFrameSizeMode}
-          onAnnotationFrameSizeModeChange={setAnnotationFrameSizeMode}
           annotationBorderShape={annotationBorderShape}
           onAnnotationBorderShapeChange={handleAnnotationBorderShapeChange}
           annotationPipeTagRotation={annotationPipeTagRotation}
@@ -11035,7 +11034,6 @@ function AppContent() {
                 annotationTopFontSize={annotationTopFontSize}
                 annotationBottomFontSize={annotationBottomFontSize}
                 annotationFrameSize={annotationFrameSize}
-                annotationFrameSizeMode={annotationFrameSizeMode}
                 annotationBorderShape={annotationBorderShape}
                 annotationPipeTagRotation={annotationPipeTagRotation}
                 annotationPipeTagZeroPadCount={annotationPipeTagZeroPadCount}

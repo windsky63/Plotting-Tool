@@ -2,7 +2,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import Toolbar from './Toolbar';
 
-const renderToolbar = () => {
+const renderToolbar = (props = {}) => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   window.matchMedia = window.matchMedia || (() => ({
     matches: false,
@@ -22,6 +22,7 @@ const renderToolbar = () => {
       onPageChange={() => {}}
       onScaleChange={() => {}}
       onFileSelect={() => {}}
+      {...props}
     />
   ));
   return {
@@ -48,6 +49,8 @@ test('common tools stay visible without a collapse toggle and auxiliary tools re
   expect(commonToggle).toBeUndefined();
   expect(commonTools).not.toBeNull();
   expect(commonTier.lastElementChild).toBe(auxiliaryToggle);
+  expect(container.querySelector('[aria-label="框型大小模式"]')).toBeNull();
+  expect(container.querySelector('[aria-label="固定框型大小（px）"]')).toBeNull();
   cleanup();
 });
 
@@ -100,5 +103,44 @@ test('PDF zoom controls and Canvas performance selector share the toolbar contro
     .querySelector('[aria-label="Canvas性能档位"]')
     .closest('.ant-select');
   expect(getComputedStyle(performanceSelect).height).toBe('32px');
+  cleanup();
+});
+
+test.each(['circle', 'split-circle', 'pipe-tag'])('%s annotation settings fit the toolbar control height', annotationBorderShape => {
+  const { container, cleanup } = renderToolbar({ annotationMode: true, annotationBorderShape });
+  const group = container.querySelector('[aria-label="标注样式设置"]');
+  const styles = getComputedStyle(group);
+
+  expect(styles.height).toBe('32px');
+  expect(styles.boxSizing).toBe('border-box');
+  expect(styles.paddingTop).toBe('0px');
+  expect(styles.paddingBottom).toBe('0px');
+  group.querySelectorAll('.ant-select').forEach(control => {
+    expect(getComputedStyle(control).height).toBe('32px');
+  });
+  cleanup();
+});
+
+test.each(['circle', 'split-circle', 'mixed'])('%s selected font settings fit the toolbar control height', type => {
+  const { container, cleanup } = renderToolbar({
+    annotationMode: true,
+    selectedAnnotationFontTools: {
+      visible: true,
+      count: 2,
+      type,
+      mixedType: type === 'mixed',
+      fontSize: 34,
+      topFontSize: 16,
+      bottomFontSize: 34
+    }
+  });
+  const group = container.querySelector('[aria-label="选中标注字体设置"]');
+  const styles = getComputedStyle(group);
+
+  expect(styles.height).toBe('32px');
+  expect(styles.paddingTop).toBe('0px');
+  expect(styles.paddingBottom).toBe('0px');
+  expect(group.style.border).toBe('');
+  expect(styles.boxShadow).toBe('inset 0 0 0 1px #91caff');
   cleanup();
 });

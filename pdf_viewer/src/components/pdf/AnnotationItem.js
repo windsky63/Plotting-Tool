@@ -1,4 +1,5 @@
 import React, { memo } from 'react';
+import { getSquareLeaderConnection } from '../../utils/squareLeaderConnection';
 
 /**
  * 单个标注组件
@@ -319,14 +320,7 @@ const AnnotationItem = memo(({
             {annotation.hasLeaderLine && (() => {
               const rectangleHalfSide = calculateAnnotationSize(displayText, fontSize, annotation).rectangleHalfSide;
               
-              // 简化版连接点计算
-              const dx = annotation.endX - annotation.startX;
-              const dy = annotation.endY - annotation.startY;
-              const length = Math.sqrt(dx * dx + dy * dy);
-              const unitX = dx / length;
-              const unitY = dy / length;
-              const connectionX = annotation.endX - unitX * rectangleHalfSide * Math.sqrt(2);
-              const connectionY = annotation.endY - unitY * rectangleHalfSide * Math.sqrt(2);
+              const { connectionX, connectionY } = getSquareLeaderConnection(annotation, rectangleHalfSide);
               
               return (
                 <g>

@@ -6,12 +6,16 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { getNextPipeSegmentLabel } from '../../utils/pipeSegmentUtils';
 import { shouldCreatePipeSegmentOnMouseDown } from '../../utils/pdfInteractionUtils';
+import { getSquareLeaderConnection } from '../../utils/squareLeaderConnection';
 import {
-  FRAME_SIZE_MODE_AUTO_A3,
-  getAnnotationFrameSizeMode,
-  resolveAnnotationFrameSize,
+  getFixedA3TenMmFrameSize,
+  isFixedA3TenMmShape,
   scaleAnnotationValue
 } from '../../utils/pageAnnotationScale';
+import {
+  DEFAULT_TEXT_RECTANGLE_FRAME_SIZE,
+  getAnnotationFrameSize
+} from '../../utils/textRectangleFrame';
 
 export const usePDFAnnotations = ({
   // 基础状态
@@ -27,7 +31,6 @@ export const usePDFAnnotations = ({
   annotationTopFontSize,
   annotationBottomFontSize,
   annotationFrameSize,
-  annotationFrameSizeMode = FRAME_SIZE_MODE_AUTO_A3,
   annotationBorderShape,
   annotationPipeTagRotation = 0,
   annotationPipeTagZeroPadCount = 0,
@@ -155,13 +158,10 @@ export const usePDFAnnotations = ({
     const annotationPageSize = typeof getPageSize === 'function'
       ? (getPageSize(annotation?.page) || pageSize)
       : pageSize;
-    const fixedA3Shape = getAnnotationFrameSizeMode(annotation, annotationFrameSizeMode) === FRAME_SIZE_MODE_AUTO_A3;
-    const baseFrameSize = resolveAnnotationFrameSize({
-      annotation,
-      pageSize: annotationPageSize,
-      fallbackMode: annotationFrameSizeMode,
-      fallbackSize: annotationFrameSize
-    });
+    const fixedA3Shape = isFixedA3TenMmShape(annotation?.borderShape);
+    const baseFrameSize = fixedA3Shape
+      ? getFixedA3TenMmFrameSize(annotationPageSize)
+      : getAnnotationFrameSize(annotation, annotationFrameSize || 56.7);
 
     // 计算文本的显示宽度（考虑中英文字符）
     const getTextWidth = (text, fontSize) => {
@@ -237,7 +237,7 @@ export const usePDFAnnotations = ({
       lineLength,
       diagonalLength: finalDiagonalLength
     };
-  }, [annotationFrameSize, annotationFrameSizeMode, getPageSize, pageSize]);
+  }, [annotationFrameSize, getPageSize, pageSize]);
 
   // 计算引导线与标注框的最佳连接点
   const calculateConnectionPoint = useCallback((annotation, shapeType, shapeSize) => {
@@ -290,31 +290,9 @@ export const usePDFAnnotations = ({
         break;
         
       case 'rectangle':
-        // 矩形：连接到最接近的角点
-        const rectVertices = [
-          { x: annotation.endX - shapeSize, y: annotation.endY - shapeSize },
-          { x: annotation.endX + shapeSize, y: annotation.endY - shapeSize },
-          { x: annotation.endX + shapeSize, y: annotation.endY + shapeSize },
-          { x: annotation.endX - shapeSize, y: annotation.endY + shapeSize }
-        ];
-        
-        let closestRectVertex = rectVertices[0];
-        let minRectDistance = Infinity;
-        
-        rectVertices.forEach(vertex => {
-          const distance = Math.sqrt(
-            Math.pow(vertex.x - annotation.startX, 2) + 
-            Math.pow(vertex.y - annotation.startY, 2)
-          );
-          if (distance < minRectDistance) {
-            minRectDistance = distance;
-            closestRectVertex = vertex;
-          }
-        });
-        
-        connectionX = closestRectVertex.x;
-        connectionY = closestRectVertex.y;
+        ({ connectionX, connectionY } = getSquareLeaderConnection(annotation, shapeSize));
         break;
+
       case 'text-rectangle':
       case 'pipe-tag': {
         const tagWidth = shapeSize?.width || 130;
@@ -406,16 +384,11 @@ export const usePDFAnnotations = ({
       : pageSize;
     const scaledTopFontSize = scaleAnnotationValue(baseTopFontSize, drawingPageSize, baseTopFontSize);
     const scaledBottomFontSize = scaleAnnotationValue(baseBottomFontSize, drawingPageSize, baseBottomFontSize);
-    const scaledFrameSize = resolveAnnotationFrameSize({
-      annotation: {
-        borderShape: annotationBorderShape,
-        frameSize: annotationFrameSize,
-        frameSizeMode: annotationFrameSizeMode
-      },
-      pageSize: drawingPageSize,
-      fallbackMode: annotationFrameSizeMode,
-      fallbackSize: annotationFrameSize
-    });
+    const scaledFrameSize = isFixedA3TenMmShape(annotationBorderShape)
+      ? getFixedA3TenMmFrameSize(drawingPageSize)
+      : isTextRectangle
+      ? DEFAULT_TEXT_RECTANGLE_FRAME_SIZE
+      : scaleAnnotationValue(annotationFrameSize || 56.7, drawingPageSize, 56.7);
     const annotation = {
       page: pageNumber,
       type: 'text',
@@ -428,7 +401,6 @@ export const usePDFAnnotations = ({
       topFontSize: annotationBorderShape === 'split-circle' ? scaledTopFontSize : undefined,
       bottomFontSize: annotationBorderShape === 'split-circle' ? scaledBottomFontSize : undefined,
       frameSize: scaledFrameSize,
-      frameSizeMode: annotationFrameSizeMode,
       borderShape: annotationBorderShape,
       rotation: annotationBorderShape === 'pipe-tag' ? (Number(annotationPipeTagRotation) || 0) : undefined,
       isDragged: false,

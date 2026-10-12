@@ -10,7 +10,9 @@ export function useAnnotationDragSession(options) {
   useLayoutEffect(() => {
     if (!options.draggingAnnotation || options.enabled === false) return undefined;
     const initial = latest.current;
-    const source = initial.annotations.find(a => a.id === initial.draggingAnnotation);
+    const source = initial.annotationsById
+      ? initial.annotationsById.get(initial.draggingAnnotation)
+      : initial.annotations.find(a => a.id === initial.draggingAnnotation);
     if (!source) {
       initial.setDraggingAnnotation(null);
       return undefined;
@@ -18,7 +20,9 @@ export function useAnnotationDragSession(options) {
     const selected = new Set(initial.multiSelectedAnnotationIds || []);
     const group = selected.size > 1 && selected.has(source.id) && initial.multiAnnotationStartPositions;
     const originals = group
-      ? initial.annotations.filter(a => selected.has(a.id) && initial.multiAnnotationStartPositions[a.id])
+      ? (initial.annotationsById
+        ? Array.from(selected, id => initial.annotationsById.get(id)).filter(a => a && initial.multiAnnotationStartPositions[a.id])
+        : initial.annotations.filter(a => selected.has(a.id) && initial.multiAnnotationStartPositions[a.id]))
       : [source];
     let frame = null;
     let pointer = null;

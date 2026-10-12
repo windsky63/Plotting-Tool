@@ -68,6 +68,22 @@ test('group movement across pages commits all selected annotations in a single c
   expect(commit.mock.calls[0][0][1]).toEqual({ id: 'b', updates: { startX: 110, startY: 220, endX: 310, endY: 420 } });
 });
 
+test('drag start uses the shared ID index without scanning all annotations', () => {
+  const find = jest.spyOn(source, 'find').mockImplementation(() => { throw new Error('full scan'); });
+  const filter = jest.spyOn(source, 'filter').mockImplementation(() => { throw new Error('full scan'); });
+  config = {
+    annotationsById: new Map(source.map(annotation => [annotation.id, annotation])),
+    multiSelectedAnnotationIds: ['a', 'b'],
+    multiAnnotationStartPositions: { a: source[0], b: source[1] }
+  };
+  render(); mouse('mousemove', 130, 250); frame();
+  expect(preview.mock.calls[0][0]).toHaveLength(2);
+  expect(find).not.toHaveBeenCalled();
+  expect(filter).not.toHaveBeenCalled();
+  mouse('mouseup', 130, 250);
+  expect(commit).toHaveBeenCalledTimes(1);
+});
+
 test('unrelated parent rerender does not cancel or restart an active gesture', () => {
   render(); mouse('mousemove', 130, 250); render(); frame(); mouse('mouseup', 150, 270);
   expect(commit).toHaveBeenCalledTimes(1);

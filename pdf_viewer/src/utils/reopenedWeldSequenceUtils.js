@@ -256,7 +256,6 @@ export const buildReopenedWeldSequence = (annotations = [], currentPage = 1) => 
         annotationTopFontSize: annotation.topFontSize,
         annotationBottomFontSize: annotation.bottomFontSize,
         annotationFrameSize: annotation.frameSize,
-        annotationFrameSizeMode: annotation.frameSizeMode,
         annotationColor: annotation.color || '#ff0000',
         annotationRuleId: annotation.ruleId || null,
         annotationRuleName: annotation.ruleName || ''
@@ -356,7 +355,6 @@ export const buildReopenedAnnotationRule = (welds = [], currentPage = 1) => {
     topFontSize: exemplar.annotationTopFontSize,
     bottomFontSize: exemplar.annotationBottomFontSize,
     frameSize: exemplar.annotationFrameSize || 56.7,
-    frameSizeMode: exemplar.annotationFrameSizeMode,
     borderShape: exemplar.annotationBorderShape || 'split-circle',
     batchContent: {
       diameterSource: 'manual',

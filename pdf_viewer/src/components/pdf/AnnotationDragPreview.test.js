@@ -25,3 +25,43 @@ test('preview renders selected items without rerendering parent and restores ori
     expect(container.querySelector('[data-annotation-drag-preview]').textContent).toBe('');
   } finally { act(() => root.unmount()); container.remove(); }
 });
+
+test('120 rigid moves reuse one SVG render and apply the scaled final translation', () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  const container = document.createElement('div'); document.body.appendChild(container);
+  const root = createRoot(container); const ref = createRef();
+  const renderer = jest.fn((page, annotations) => annotations.map(a => <svg key={a.id}><text>{a.text}</text></svg>));
+  const original = { id: 'a', page: 1, text: 'F1', startX: 10, startY: 20, endX: 30, endY: 40 };
+  try {
+    act(() => root.render(<div><svg data-pdf-annotation-id="a" />
+      <AnnotationDragPreview ref={ref} pageNumber={1} scale={2} renderAnnotations={renderer} /></div>));
+    for (let i = 0; i < 120; i += 1) act(() => ref.current.update([{
+      ...original, startX: 10 + i, startY: 20 + i, endX: 30 + i, endY: 40 + i
+    }]));
+    expect(renderer).toHaveBeenCalledTimes(1);
+    const preview = container.querySelector('[data-annotation-drag-preview]');
+    expect(preview.style.transform).toBe('translate(238px, 238px)');
+    expect(container.querySelector('[data-pdf-annotation-id="a"]').style.visibility).toBe('hidden');
+    act(() => ref.current.clear());
+    expect(preview.style.transform).toBe('');
+    expect(container.querySelector('[data-pdf-annotation-id="a"]').style.visibility).toBe('');
+    act(() => ref.current.update([{ ...original, endX: 80 }]));
+    expect(preview.style.transform).toBe('');
+    expect(renderer).toHaveBeenCalledTimes(2);
+  } finally { act(() => root.unmount()); container.remove(); }
+});
+
+test('moving only the frame endpoint still redraws the anchored leader', () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  const container = document.createElement('div'); document.body.appendChild(container);
+  const root = createRoot(container); const ref = createRef();
+  const renderer = jest.fn(() => <svg />);
+  const original = { id: 'a', page: 1, text: 'F1', startX: 10, startY: 20, endX: 30, endY: 40 };
+  try {
+    act(() => root.render(<AnnotationDragPreview ref={ref} pageNumber={1} renderAnnotations={renderer} />));
+    act(() => ref.current.update([original]));
+    act(() => ref.current.update([{ ...original, endX: 80 }]));
+    expect(renderer).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-annotation-drag-preview]').style.transform).toBe('');
+  } finally { act(() => root.unmount()); container.remove(); }
+});

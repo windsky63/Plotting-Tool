@@ -56,14 +56,6 @@ const MemoizedAnnotationWrapper = memo(({
     wasMultiSelected === isMultiSelected
   );
   
-  // 🔍 性能监控：只记录新添加的标注（其他标注应该被跳过）
-  if (!isEqual && !prev.id.includes('temp')) {
-    // 只在添加新标注时输出（跳过进入/退出标注模式的日志）
-    if (prev.text === next.text && prevProps.interactionDisabled === nextProps.interactionDisabled) {
-      console.log(`🔄 [新标注] ${next.text || next.id.slice(-8)} 被渲染`);
-    }
-  }
-  
   return isEqual;
 });
 

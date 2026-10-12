@@ -26,13 +26,19 @@ describe('textRectangleFrame', () => {
     expect(getAnnotationFrameSize(circle)).toBe(84);
   });
 
-  test('preserves a text rectangle with an explicit unified size mode', () => {
+  test.each(['auto-a3', 'fixed-px'])('restores rectangle fitting for saved %s annotations', frameSizeMode => {
     const annotation = {
       borderShape: 'text-rectangle',
-      frameSize: 80,
-      frameSizeMode: 'fixed-px'
+      frameSize: 100,
+      frameSizeMode,
+      text: 'PIPE-1',
+      fontSize: 34
     };
-    expect(normalizeTextRectangleAnnotation(annotation)).toBe(annotation);
+    expect(normalizeTextRectangleAnnotation(annotation)).toEqual({
+      ...annotation,
+      frameSize: DEFAULT_TEXT_RECTANGLE_FRAME_SIZE
+    });
+    expect(getAnnotationFrameSize(annotation)).toBe(DEFAULT_TEXT_RECTANGLE_FRAME_SIZE);
   });
 
   test('normalizes rectangle collections loaded from storage', () => {

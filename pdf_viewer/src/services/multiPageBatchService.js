@@ -17,8 +17,8 @@ import { PathTypeClassifier, PathType } from '../utils/PathTypeClassifier';
 import { groupVectorsIntoPathsStructured } from '../utils/WeldDetector';
 import { analyzePipelineTopology } from '../utils/PipelineTopologyAnalyzer';
 import {
-  getAnnotationFrameSizeMode,
-  resolveAnnotationFrameSize,
+  getFixedA3TenMmFrameSize,
+  isFixedA3TenMmShape,
   scaleAnnotationValue
 } from '../utils/pageAnnotationScale';
 import {
@@ -3044,7 +3044,6 @@ class MultiPageBatchService {
       : requestedColor;
     const baseFontSize = annotationRule?.fontSize || 34;
     const baseFrameSize = annotationRule?.frameSize || 56.7;
-    const baseFrameSizeMode = getAnnotationFrameSizeMode(annotationRule);
     const borderShape = annotationRule?.borderShape || 'circle';
     const batchContent = annotationRule?.batchContent || {};
     
@@ -3093,18 +3092,18 @@ class MultiPageBatchService {
         _fromVectors: pageInfo?._fromVectors === true
       };
       const scaledFontSize = scaleAnnotationValue(baseFontSize, annotationPageSize, baseFontSize);
-      const pageFrameSetting = pageWelds.find(weld => Number.isFinite(Number(weld?.annotationFrameSize)));
-      const pageFrameSizeMode = pageFrameSetting?.annotationFrameSizeMode || baseFrameSizeMode;
-      const pageFrameSize = resolveAnnotationFrameSize({
-        annotation: {
-          borderShape,
-          frameSize: Number(pageFrameSetting?.annotationFrameSize) || baseFrameSize,
-          frameSizeMode: pageFrameSizeMode
-        },
-        pageSize: this.pagePdfSizes[pageNum] || annotationPageSize,
-        fallbackMode: baseFrameSizeMode,
-        fallbackSize: baseFrameSize
-      });
+      const fixedPageFrameSize = getFixedA3TenMmFrameSize(this.pagePdfSizes[pageNum]);
+      const scaledFrameSize = isFixedA3TenMmShape(borderShape)
+        ? fixedPageFrameSize
+        : baseFrameSize;
+      // Stored preview values used to override the A3 invariant.  They may
+      // originate from OCR pixels or another page, so fixed shapes must never
+      // inherit them.
+      const pageFrameSize = isFixedA3TenMmShape(borderShape)
+        ? fixedPageFrameSize
+        : (Number(
+          pageWelds.find(weld => Number.isFinite(Number(weld?.annotationFrameSize)))?.annotationFrameSize
+        ) || scaledFrameSize);
       const pageMaterialRows = batchContent.materialRowsByPage?.[pageNum] ||
         batchContent.materialRowsByPage?.[String(pageNum)] || [];
       const materialText = row => [
@@ -3286,8 +3285,9 @@ class MultiPageBatchService {
           text: canonicalDisplayNumber,
           color: weld.annotationColor || baseColor,
           fontSize: Number(weld.annotationFontSize) || scaledFontSize,
-          frameSize: pageFrameSize,
-          frameSizeMode: weld.annotationFrameSizeMode || pageFrameSizeMode,
+          frameSize: isFixedA3TenMmShape(resolvedBorderShape)
+            ? fixedPageFrameSize
+            : (Number(weld.annotationFrameSize) || scaledFrameSize),
           borderShape: resolvedBorderShape,
           topText,
           jointTypeText,

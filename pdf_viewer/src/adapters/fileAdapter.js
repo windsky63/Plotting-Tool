@@ -139,6 +139,7 @@ class FileAdapter {
             await writable.close();
             return {
               success: true,
+              saveMethod: 'original',
               savedPath: this.fileHandle.name,
               message: '已成功保存到原文件'
             };
@@ -176,6 +177,7 @@ class FileAdapter {
               await writable.close();
               return {
                 success: true,
+                saveMethod: 'save-as',
                 savedPath: pickedHandle.name,
                 message: `文件已保存: ${pickedHandle.name}`
               };
@@ -196,12 +198,13 @@ class FileAdapter {
         a.click();
         document.body.removeChild(a);
         
-        setTimeout(() => URL.revokeObjectURL(url), 100);
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
         
         return {
           success: true,
+          saveMethod: 'download',
           savedPath: defaultFileName,
-          message: `文件已下载: ${defaultFileName}`
+          message: `已发起下载: ${defaultFileName}，请检查浏览器下载列表`
         };
       } catch (error) {
         console.error('Web 保存文件失败:', error);

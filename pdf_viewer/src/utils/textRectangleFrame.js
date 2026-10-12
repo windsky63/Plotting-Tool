@@ -8,7 +8,6 @@ export const isTextRectangleAnnotation = annotation => (
 // user-editable frame multiplier allows stale data to create large gaps.
 export const normalizeTextRectangleAnnotation = annotation => {
   if (!annotation || !isTextRectangleAnnotation(annotation)) return annotation;
-  if (annotation.frameSizeMode === 'auto-a3' || annotation.frameSizeMode === 'fixed-px') return annotation;
   if (Number(annotation.frameSize) === DEFAULT_TEXT_RECTANGLE_FRAME_SIZE) return annotation;
   return {
     ...annotation,
@@ -23,16 +22,10 @@ export const normalizeTextRectangleAnnotations = annotations => (
 );
 
 export const getAnnotationFrameSize = (annotation, fallback = 56.7) => {
-  const storedFrameSize = Number(annotation?.frameSize);
-  if (
-    (annotation?.frameSizeMode === 'auto-a3' || annotation?.frameSizeMode === 'fixed-px') &&
-    Number.isFinite(storedFrameSize) && storedFrameSize > 0
-  ) {
-    return storedFrameSize;
-  }
   if (isTextRectangleAnnotation(annotation)) {
     return DEFAULT_TEXT_RECTANGLE_FRAME_SIZE;
   }
+  const storedFrameSize = Number(annotation?.frameSize);
   return Number.isFinite(storedFrameSize) && storedFrameSize > 0
     ? storedFrameSize
     : fallback;

@@ -61,9 +61,9 @@ import { VectorSpatialIndex } from '../utils/VectorSpatialIndex';
 import { getWeldSelectionKey } from '../utils/WeldSmartSorter';
 import { initGlobalPipelineCheck } from '../utils/QuickPipelineCheck';
 import {
-  FRAME_SIZE_MODE_AUTO_A3,
   getAnnotationPageSizeFromSnapshot,
-  resolveAnnotationFrameSize,
+  getFixedA3TenMmFrameSize,
+  isFixedA3TenMmShape,
   scaleAnnotationValue
 } from '../utils/pageAnnotationScale';
 import {
@@ -215,7 +215,6 @@ const PDFViewer = ({
   annotationTopFontSize,
   annotationBottomFontSize,
   annotationFrameSize,
-  annotationFrameSizeMode = FRAME_SIZE_MODE_AUTO_A3,
   annotationBorderShape,
   annotationPipeTagRotation,
   annotationPipeTagZeroPadCount = 0,
@@ -801,27 +800,11 @@ const PDFViewer = ({
   ]);
   const getWeldPreviewFrameSize = useCallback((pageNumber) => {
     const pendingRule = multiPageBatchService.getPendingBatchAnnotationRule();
-    return resolveAnnotationFrameSize({
-      annotation: {
-        frameSize: Number(pendingRule?.frameSize) || Number(annotationFrameSize) || 56.7,
-        frameSizeMode: pendingRule?.frameSizeMode || annotationFrameSizeMode,
-        borderShape: pendingRule?.borderShape || annotationBorderShape
-      },
-      pageSize: getAnnotationPageSize(pageNumber),
-      fallbackMode: annotationFrameSizeMode,
-      fallbackSize: annotationFrameSize
-    });
-  }, [annotationBorderShape, annotationFrameSize, annotationFrameSizeMode, getAnnotationPageSize]);
-
-  useEffect(() => {
-    const pendingRule = multiPageBatchService.getPendingBatchAnnotationRule();
-    if (!pendingRule) return;
-    multiPageBatchService.setPendingBatchAnnotationRule({
-      ...pendingRule,
-      frameSize: Number(annotationFrameSize) || 56.7,
-      frameSizeMode: annotationFrameSizeMode
-    });
-  }, [annotationFrameSize, annotationFrameSizeMode]);
+    const shape = pendingRule?.borderShape || annotationBorderShape;
+    return isFixedA3TenMmShape(shape)
+      ? getFixedA3TenMmFrameSize(getAnnotationPageSize(pageNumber))
+      : (Number(pendingRule?.frameSize) || Number(annotationFrameSize) || 56.7);
+  }, [annotationBorderShape, annotationFrameSize, getAnnotationPageSize]);
 
   const activeSinglePageSnapshotDisplaySize = useMemo(() => {
     if (!activeDisplayedPageSnapshot) return null;
@@ -5210,7 +5193,6 @@ const PDFViewer = ({
      annotationTopFontSize,
      annotationBottomFontSize,
      annotationFrameSize,
-     annotationFrameSizeMode,
      annotationBorderShape,
      annotationPipeTagRotation,
      annotationPipeTagZeroPadCount,
@@ -5293,6 +5275,7 @@ const PDFViewer = ({
     onAnnotationUpdate,
     onAnnotationMoveCommit,
     onAnnotationDragPreview: handleAnnotationDragPreview,
+    annotationsById: annotationPageIndex?.byId,
     documentKey: file,
     annotationDragEnabled: !annotationMode && !pipeSegmentMode && !areaDeleteMode,
     annotations,
@@ -5435,7 +5418,7 @@ const PDFViewer = ({
     } = annotationRenderLiveStateRef.current;
     
     // 🔍 性能监控：只在标注数量多时输出警告（可选，生产环境可注释掉）
-    if (pageAnnotations.length > 100) {
+    if (!dragPreviewAnnotations && pageAnnotations.length > 100) {
       console.warn(`⚠️ [性能提示] 第${pageNumber}页有 ${pageAnnotations.length} 个标注，建议减少标注数量`);
     }
     
@@ -5501,11 +5484,6 @@ const PDFViewer = ({
           const selectedIdSet = liveState.multiSelectedAnnotationIds;
           if (selectedIdSet.size > 0 && !selectedIdSet.has(annotation.id)) {
             liveState.clearMultiSelection();
-          }
-
-          if (e.button === 0) {
-            liveState.onAnnotationClick?.(annotation);
-            liveState.onAnnotationSelectionChange?.([annotation.id]);
           }
 
           // 处理拖拽逻辑
@@ -6106,7 +6084,7 @@ const PDFViewer = ({
               >
                 {/* 引导线（如果有） - 连接到矩形角点 */}
                 {annotation.hasLeaderLine && (() => {
-                  const connection = hookCalculateConnectionPoint(annotation, 'rectangle', rectangleHalfSide * Math.sqrt(2));
+                  const connection = hookCalculateConnectionPoint(annotation, 'rectangle', rectangleHalfSide);
                   
                   return (
                     <g>
@@ -6585,6 +6563,7 @@ const PDFViewer = ({
   const renderAnnotationDragPreview = pageNumber => (
     <AnnotationDragPreview
       pageNumber={pageNumber}
+      scale={scale}
       renderAnnotations={renderAnnotations}
       ref={preview => {
         if (preview) annotationDragPreviewRefs.current.set(pageNumber, preview);
@@ -6985,7 +6964,7 @@ const PDFViewer = ({
             <g>
               {/* 引导线（如果有） - 连接到矩形角点 */}
               {currentAnnotation.hasLeaderLine && (() => {
-                const connection = hookCalculateConnectionPoint(currentAnnotation, 'rectangle', rectangleHalfSide * Math.sqrt(2));
+                const connection = hookCalculateConnectionPoint(currentAnnotation, 'rectangle', rectangleHalfSide);
                 
                 return (
                   <g>
@@ -8935,12 +8914,7 @@ const PDFViewer = ({
           {
             normalizedPlacementArea: latestAreasRef.current.weldRecognition || globalWeldRecognitionArea,
             graphicVectors: pageVectors[pageNum] || [],
-            circleDiameter: resolveAnnotationFrameSize({
-              annotation: { frameSize: annotationFrameSize, frameSizeMode: annotationFrameSizeMode },
-              pageSize: getAnnotationPageSize(pageNum),
-              fallbackMode: annotationFrameSizeMode,
-              fallbackSize: annotationFrameSize
-            }),
+            circleDiameter: annotationFrameSize || 56.7,
             allowLeaderThroughGraphics: true,
             allowLeaderCrossing: false
           }
@@ -8960,12 +8934,7 @@ const PDFViewer = ({
           const scaledFontSize = scaleAnnotationValue(annotationFontSize || 34, pageSize, 34);
           const scaledTopFontSize = scaleAnnotationValue(annotationTopFontSize || annotationFontSize || 34, pageSize, scaledFontSize);
           const scaledBottomFontSize = scaleAnnotationValue(annotationBottomFontSize || annotationFontSize || 34, pageSize, scaledFontSize);
-          const scaledFrameSize = resolveAnnotationFrameSize({
-            annotation: { frameSize: annotationFrameSize, frameSizeMode: annotationFrameSizeMode },
-            pageSize: getAnnotationPageSize(pageNum),
-            fallbackMode: annotationFrameSizeMode,
-            fallbackSize: annotationFrameSize
-          });
+          const scaledFrameSize = annotationFrameSize || 56.7;
 
           newAnnotations.push({
             id: Date.now() + Math.random().toString(36).substr(2, 9) + `${pageNum}-${index}`,
@@ -8981,7 +8950,6 @@ const PDFViewer = ({
             topFontSize: scaledTopFontSize,
             bottomFontSize: scaledBottomFontSize,
             frameSize: scaledFrameSize,
-            frameSizeMode: annotationFrameSizeMode,
             borderShape: 'circle',
             hasLeaderLine: true,
             remark: activeAnnotationRule?.remark || '批量自动生成',
@@ -9028,12 +8996,7 @@ const PDFViewer = ({
       {
         normalizedPlacementArea: latestAreasRef.current.weldRecognition || globalWeldRecognitionArea,
         graphicVectors: pageVectors[currentPage] || [],
-        circleDiameter: resolveAnnotationFrameSize({
-          annotation: { frameSize: annotationFrameSize, frameSizeMode: annotationFrameSizeMode },
-          pageSize: getAnnotationPageSize(currentPage),
-          fallbackMode: annotationFrameSizeMode,
-          fallbackSize: annotationFrameSize
-        }),
+        circleDiameter: annotationFrameSize || 56.7,
         allowLeaderThroughGraphics: true,
         allowLeaderCrossing: false
       }
@@ -9063,12 +9026,7 @@ const PDFViewer = ({
       const scaledFontSize = scaleAnnotationValue(annotationFontSize || 34, pageSize, 34);
       const scaledTopFontSize = scaleAnnotationValue(annotationTopFontSize || annotationFontSize || 34, pageSize, scaledFontSize);
       const scaledBottomFontSize = scaleAnnotationValue(annotationBottomFontSize || annotationFontSize || 34, pageSize, scaledFontSize);
-      const scaledFrameSize = resolveAnnotationFrameSize({
-        annotation: { frameSize: annotationFrameSize, frameSizeMode: annotationFrameSizeMode },
-        pageSize: getAnnotationPageSize(currentPage),
-        fallbackMode: annotationFrameSizeMode,
-        fallbackSize: annotationFrameSize
-      });
+      const scaledFrameSize = annotationFrameSize || 56.7;
 
       return {
         id: Date.now() + Math.random().toString(36).substr(2, 9) + index,
@@ -9088,7 +9046,6 @@ const PDFViewer = ({
         topFontSize: scaledTopFontSize,
         bottomFontSize: scaledBottomFontSize,
         frameSize: scaledFrameSize,
-        frameSizeMode: annotationFrameSizeMode,
         borderShape: 'circle', // 圆形
         hasLeaderLine: true,   // 开启引导线
         remark: activeAnnotationRule?.remark || '批量自动生成', // 自动添加备注
@@ -9359,8 +9316,7 @@ const PDFViewer = ({
         ...restoredRuleSource,
         // The right-side circle setting is the single source of truth for
         // supplemental points, rather than varying historical page styles.
-        frameSize: Number(annotationFrameSize) || 56.7,
-        frameSizeMode: annotationFrameSizeMode
+        frameSize: Number(annotationFrameSize) || 56.7
       }
       : null;
     const restoredPageRange = Number(numPages) > 0
@@ -9710,8 +9666,6 @@ const PDFViewer = ({
         // The right-side standard remains the fallback for an empty page.
         annotationFrameSize: Number(reopenedTemplate?.annotationFrameSize) ||
           Number(annotationFrameSize) || Number(pendingRule?.frameSize) || 56.7,
-        annotationFrameSizeMode: reopenedTemplate?.annotationFrameSizeMode ||
-          pendingRule?.frameSizeMode || annotationFrameSizeMode,
         annotationColor: reopenedTemplate?.annotationColor,
         annotationRuleId: reopenedTemplate?.annotationRuleId,
         annotationRuleName: reopenedTemplate?.annotationRuleName
