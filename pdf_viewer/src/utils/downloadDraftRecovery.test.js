@@ -70,12 +70,21 @@ test('reopening the original PDF offers local recovery when the cloud is unavail
   const draft = { fileInfo: info, annotations: [{ page: 1 }], updatedAt: '2026-10-10T08:00:00Z' };
   const context = {
     undoRedoSystem: { clearHistory: jest.fn() }, isElectron: () => false,
+    cancelPdfMetadataRead: jest.fn(),
+    releaseIdleDraftWorker: jest.fn(),
     loadLatestAnnotationDraft: jest.fn(async () => draft), resetAnnotationDraftState: jest.fn(),
     MAX_RESIDENT_PDF_BUFFER_BYTES: 64 * 1024 * 1024,
     warnIfPdfEncrypted: jest.fn(), buildPdfDraftFileInfo: jest.fn(async () => info),
     currentPdfDraftInfoRef: { current: null },
     loadAnnotationsFromPDFMetadata: jest.fn(async () => null),
-    maybeRestoreCloudAnnotationDraft: jest.fn(async () => false),
+    maybeRestoreCloudAnnotationDraft: jest.fn(async (info, summary, local) => {
+      context.restoreAnnotationDraftData(local, '本机草稿'); return true;
+    }),
+    pdfDraftSummaryRef: {current: null}, cloudRecoveryPrefetchRef: {current: null},
+    cloudAnnotationDraftGenerationRef: {current: 1},
+    getAnnotationDraftUserKey: () => 'web_test', getCurrentProjectDraftFileInfo: info => info,
+    loadCloudAnnotationDraft: jest.fn(async () => null), setAnnotations: jest.fn(), setTotalPages: jest.fn(),
+    setBatchSequenceDraftState: jest.fn(),
     isSamePdfDraftFile: (left, right) => left?.fingerprint === right?.fingerprint,
     getDraftUpdatedTime: value => value?.updatedAt ? new Date(value.updatedAt).getTime() : 0,
     restoreAnnotationDraftData: jest.fn(),
@@ -87,10 +96,11 @@ test('reopening the original PDF offers local recovery when the cloud is unavail
   };
   const open = new Function(...Object.keys(context), `return (${generate(node).code});`)(...Object.values(context));
   await open(file);
-  expect(context.Modal.confirm).toHaveBeenCalledTimes(1);
+  expect(context.maybeRestoreCloudAnnotationDraft).toHaveBeenCalledWith(expect.objectContaining({fingerprint: 'same-pdf'}), null, draft);
   expect(context.restoreAnnotationDraftData).toHaveBeenCalledWith(draft, '本机草稿');
   expect(context.loadLatestAnnotationDraft.mock.invocationCallOrder[0])
     .toBeLessThan(context.resetAnnotationDraftState.mock.invocationCallOrder[0]);
+  expect(context.loadAnnotationsFromPDFMetadata).not.toHaveBeenCalled();
 });
 
 test('a failed cloud save cannot retire a checkpoint or cancel its retry', async () => {

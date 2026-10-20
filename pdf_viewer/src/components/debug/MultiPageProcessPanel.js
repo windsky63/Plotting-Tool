@@ -715,7 +715,7 @@ export const MultiPageProcessPanel = ({
     const comparison = multiPageBatchService.getPipelineComparison();
     const allWelds = multiPageBatchService.getAllWelds();
     const status = multiPageBatchService.getStatus();
-    const retainedVectors = multiPageBatchService.pageVectors || {};
+    const retainedVectors = multiPageBatchService.getVectorPageSummary();
     const retainedTexts = multiPageBatchService.pageTextDetections || {};
     const hasCompletedTextDetection = Object.values(retainedTexts).some(result => (
       result && Object.prototype.hasOwnProperty.call(result, 'detections')
@@ -973,7 +973,7 @@ export const MultiPageProcessPanel = ({
     try {
       if (aiDirectWeldMode) {
         for (let page = Number(startPage); page <= Number(endPage); page += 1) {
-          multiPageBatchService.pageVectors[page] = [];
+          await multiPageBatchService.cachePageVectors(page, []);
           delete multiPageBatchService.pageRecognizers?.[page];
         }
         setVectorsResult({});
@@ -991,7 +991,7 @@ export const MultiPageProcessPanel = ({
         onVectorsExtracted(result);
       }
 
-      const totalVectors = Object.values(result).reduce((sum, vectors) => sum + vectors.length, 0);
+      const totalVectors = Object.values(result).reduce((sum, vectors) => sum + (vectors.length ?? vectors.vectorCount ?? 0), 0);
       message.success(`矢量提取完成! 共 ${totalVectors} 个矢量元素`);
     } catch (error) {
       message.error(`矢量提取失败: ${error.message}`);
@@ -1925,8 +1925,7 @@ export const MultiPageProcessPanel = ({
         for (let page = Number(startPage); page <= Number(endPage); page += 1) {
           const baseWelds = multiPageBatchService.getPageWelds(page)
             .filter(weld => weld.isAutoPipeLengthInserted !== true);
-          const pageVectors = vectorsResult?.[page] || vectorsResult?.[String(page)] ||
-            multiPageBatchService.pageVectors?.[page] || [];
+          const pageVectors = await multiPageBatchService.getPageVectors(page);
           const pageMaterialRows = materialRowsByPage?.[page] || materialRowsByPage?.[String(page)] || [];
           const result = planStraightPipeAutoWelds({
             pageNum: page,
@@ -2061,7 +2060,7 @@ export const MultiPageProcessPanel = ({
     message.success(`已导出${comparison ? '管线对账' : '管线核对'} CSV: ${result.fileName}`);
   }, [getPdfBaseName]);
 
-  const handleConfirmAnnotations = useCallback(() => {
+  const handleConfirmAnnotations = useCallback(async () => {
     if (!numbersResult || numbersResult.length === 0) {
       message.warning('没有编号数据');
       return;
@@ -2072,7 +2071,7 @@ export const MultiPageProcessPanel = ({
         message.warning('当前正在修正编号，请使用右上角“生成可编辑标注”；如需原自动顺序，请先恢复自动顺序');
         return;
       }
-      const annotations = multiPageBatchService.convertWeldsToAnnotations(
+      const annotations = await multiPageBatchService.convertWeldsToAnnotationsFromCache(
         scale,
         batchRule,
         'KEEP_ORDER',

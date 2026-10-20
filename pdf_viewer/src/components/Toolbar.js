@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import {isElectron} from '../utils/platformDetect';
 import {
   Button,
   Input,

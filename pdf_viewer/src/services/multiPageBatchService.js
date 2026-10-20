@@ -4,6 +4,7 @@
  */
 
 import { VectorExtractionUtils } from '../utils/vectorExtractionUtils';
+import { PageVectorStore } from '../utils/pageVectorStore';
 import { VectorSpatialIndex } from '../utils/VectorSpatialIndex';
 import { ObjectRecognizer } from '../utils/ObjectRecognizer';
 import {
@@ -63,6 +64,10 @@ import { fuseRuleAndAiWelds, getAiMergeDistance, getWeldPoint, AI_RULE_HIT_RADIU
 
 class MultiPageBatchService {
   constructor() {
+    this.vectorPages = new PageVectorStore({ rebuild: async (page, scope) => {
+      if (!this.vectorPdfDocument || this.vectorPages.scope !== scope) throw new Error('源 PDF 不可用于重新提取矢量');
+      return VectorExtractionUtils.extractVectors(await this.vectorPdfDocument.getPage(page));
+    } });
     // 存储多页处理结果
     this.pageVectors = {};      // 页面矢量数据 {pageNum: vectors[]}
     this.pagePdfSizes = {};     // PDF.js scale=1 页面尺寸（PDF point）
@@ -100,6 +105,26 @@ class MultiPageBatchService {
     this.onStepChange = null;
     this.onError = null;
   }
+
+  get pageVectors() { return this.vectorPages.resident; }
+  set pageVectors(value) {
+    this.vectorPages.clearResident();
+    Object.entries(value || {}).forEach(([page, vectors]) => this.vectorPages.retain(Number(page), vectors));
+  }
+  activateVectorDocument(pdfDocument, scope = VectorExtractionUtils.getDocumentCacheKey()) {
+    if (scope && scope !== this.vectorPages.scope) {
+      this.vectorPages.activate(scope); this.pageVectorInfo = {}; this.pagePdfSizes = {};
+      this.vectorPdfDocument = null;
+    }
+    if (pdfDocument) this.vectorPdfDocument = pdfDocument;
+  }
+  async getPageVectors(page) { return this.vectorPages.get(page); }
+  async cachePageVectors(page, vectors) {
+    const info = this.getPageInfo(page, vectors);
+    if (info) { this.pageVectorInfo = this.pageVectorInfo || {}; this.pageVectorInfo[page] = info; }
+    return this.vectorPages.set(page, vectors);
+  }
+  getVectorPageSummary() { return this.vectorPages.getSummary(); }
 
   getPageInfo(pageNum, vectors = []) {
     const textData = this.pageTextDetections?.[pageNum];
@@ -143,7 +168,7 @@ class MultiPageBatchService {
       };
     }
 
-    return null;
+    return this.pageVectorInfo?.[pageNum] || null;
   }
 
   isWeldInRecognitionArea(weld, area, pageInfo) {
@@ -230,6 +255,8 @@ class MultiPageBatchService {
    */
   reset() {
     this.pageVectors = {};
+    this.vectorPages.known.clear();
+    this.pageVectorInfo = {};
     this.pagePdfSizes = {};
     this.pageTextDetections = {};
     this.pageWelds = {};
@@ -311,6 +338,7 @@ class MultiPageBatchService {
    * @returns {Promise<Object>} - 页面矢量数据 {pageNum: vectors[]}
    */
   async extractVectorsFromPages(pdfDocument, startPage, endPage) {
+    this.activateVectorDocument(pdfDocument);
     this.updateStep('vectors');
     const total = endPage - startPage + 1;
     
@@ -331,7 +359,7 @@ class MultiPageBatchService {
         // 提取矢量数据
         const vectors = await VectorExtractionUtils.extractVectors(page);
         
-        this.pageVectors[pageNum] = vectors;
+        await this.cachePageVectors(pageNum, vectors);
         
         console.log(`✅ 第${pageNum}页: 提取到 ${vectors.length} 个矢量元素`);
         // Let React paint progress and process user input between pages.
@@ -339,7 +367,7 @@ class MultiPageBatchService {
         
       } catch (error) {
         this.reportError(error, pageNum);
-        this.pageVectors[pageNum] = [];
+        await this.cachePageVectors(pageNum, []);
       }
     }
 
@@ -348,7 +376,7 @@ class MultiPageBatchService {
     // remain resident for the lifetime of the tab.
     VectorExtractionUtils.releasePdfLibSourceDocument();
     
-    return this.pageVectors;
+    return this.getVectorPageSummary();
   }
 
   /**
@@ -433,7 +461,7 @@ class MultiPageBatchService {
       // responsive before the CPU-heavy work for each page starts.
       await VectorExtractionUtils.yieldToMainThread();
       try {
-        const vectors = this.pageVectors[pageNum];
+        const vectors = await this.getPageVectors(pageNum);
         
         if (!vectors || vectors.length === 0) {
           console.warn(`⚠️ 第${pageNum}页没有矢量数据，跳过焊点识别`);
@@ -557,6 +585,8 @@ class MultiPageBatchService {
         this.reportError(error, pageNum);
         this.pageWelds[pageNum] = [];
         this.pageWeldReviewCandidates[pageNum] = [];
+      } finally {
+        delete this.pageRecognizers[pageNum];
       }
     }
 
@@ -949,7 +979,7 @@ class MultiPageBatchService {
     for (let pageNum = firstPage; pageNum <= lastPage; pageNum += 1) {
       this.updateProgress(pageNum - firstPage + 1, total, `识别第${pageNum}页管件`);
       try {
-        const vectors = this.pageVectors?.[pageNum] || [];
+        const vectors = await this.getPageVectors(pageNum);
         const welds = this.pageWelds?.[pageNum] || [];
         const pageInfo = this.getPageInfo(pageNum, vectors);
         const pageDiagonal = Math.hypot(
@@ -1168,7 +1198,7 @@ class MultiPageBatchService {
     }
 
     for (let pageNum = firstPage; pageNum <= lastPage; pageNum += 1) {
-      const vectors = this.pageVectors[pageNum] || [];
+      const vectors = await this.getPageVectors(pageNum);
       const fallbackPageInfo = this.getPageInfo(pageNum, vectors) || {};
       const materialTextData = this.pageSupportMaterialTextDetections[pageNum] || {};
       const weldTextData = this.pageSpecialWeldTextDetections[pageNum] || {};
@@ -2965,7 +2995,7 @@ class MultiPageBatchService {
       
       return {
         success: true,
-        pageVectors: this.pageVectors,
+        pageVectors: this.getVectorPageSummary(),
         pageTextDetections: this.pageTextDetections,
         pageWelds: this.pageWelds,
         pageSpecialWeldNotices: this.pageSpecialWeldNotices,
@@ -3001,7 +3031,7 @@ class MultiPageBatchService {
     for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
       stats.push({
         pageNum,
-        vectorCount: (this.pageVectors[pageNum] || []).length,
+        vectorCount: this.vectorPages.known.get(Number(pageNum)) || (this.pageVectors[pageNum] || []).length,
         textCount: (this.pageTextDetections[pageNum]?.detections || []).length,
         weldCount: (this.pageWelds[pageNum] || []).length,
         specialWeldNotices: this.pageSpecialWeldNotices[pageNum] || [],
@@ -3023,6 +3053,25 @@ class MultiPageBatchService {
    * @param {Array} flowArrows - 流向箭头列表（可选）
    * @returns {Array} - 标注对象数组
    */
+  async convertWeldsToAnnotationsFromCache(scale, rule = null, strategy = null, arrows = null, context = null) {
+    const grouped = new Map();
+    (this.allWelds || []).forEach(weld => {
+      const page = Number(weld.pageNum); if (!grouped.has(page)) grouped.set(page, []);
+      grouped.get(page).push(weld);
+    });
+    const result = [];
+    for (const [page, welds] of Array.from(grouped).sort(([a], [b]) => a - b)) {
+      const supplied = context?.pageVectors?.[page];
+      const vectors = Array.isArray(supplied) ? supplied : this.vectorPages.known.has(page)
+        ? await this.getPageVectors(page) : [];
+      result.push(...this.convertWeldsToAnnotations(scale, rule, strategy, arrows, {
+        ...context, welds, pageVectors: { [page]: vectors },
+      }));
+      await VectorExtractionUtils.yieldToMainThread();
+    }
+    return result;
+  }
+
   convertWeldsToAnnotations(
     scale,
     annotationRule = null,
@@ -3051,7 +3100,7 @@ class MultiPageBatchService {
     const weldsByPage = {};
     const pipelinesByPage = {}; // 同时收集每页的管道数据
     
-    this.allWelds.forEach(weld => {
+    (layoutContext?.welds || this.allWelds).forEach(weld => {
       if (!weldsByPage[weld.pageNum]) {
         weldsByPage[weld.pageNum] = [];
       }

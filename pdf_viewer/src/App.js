@@ -1,3 +1,5 @@
+import {optimizePdfExport} from './utils/optimizePdfExport';
+import {replacePdfAnnotationAttachment} from './utils/replacePdfAnnotationAttachment';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import styled from 'styled-components';
 import { ConfigProvider, message, Modal, Form, Input, InputNumber, Button } from 'antd';
@@ -7,6 +9,12 @@ import PDFViewer from './components/PDFViewer';
 import Toolbar from './components/Toolbar';
 import ProgressModal from './components/ProgressModal';
 import PdfExportProgress from './components/PdfExportProgress';
+import DraftRecoveryModal from './components/DraftRecoveryModal';
+import DraftSaveStatus from './components/DraftSaveStatus';
+import {createDraftSaveHealth} from './utils/draftSaveHealth';
+import {appendPdfDraftIdentity, validateRecoveryDraft} from './utils/draftRecovery';
+import {readPdfEditableAnnotations} from './utils/pdfAnnotationAttachments';
+import {readPdfMetadata, cancelPdfMetadataRead} from './utils/pdfMetadataReader';
 import { getPdfExportProgress, publishPdfExportProgress } from './utils/pdfExportProgress';
 import { savePdfWithTimeBudget } from './utils/pdfSerialization';
 import { buildAnnotationMoveTransaction, applyAnnotationMovePatches, getAnnotationMovePages } from './utils/annotationMoveTransaction';
@@ -41,10 +49,12 @@ import {
   markLatestAnnotationDraftSaved,
   saveEmergencyAnnotationDraft
 } from './utils/annotationDraftStore';
-import { loadCloudAnnotationDraft } from './utils/annotationCloudDraftStore';
+import { loadCloudAnnotationDraft, getAnnotationDraftUserKey } from './utils/annotationCloudDraftStore';
+import { collectChangedAnnotationPages, acknowledgeCheckpointPages } from './utils/annotationCheckpoint';
 import {
   saveCloudAnnotationDraftOffMainThread,
-  saveLocalAnnotationDraftOffMainThread
+  saveLocalAnnotationDraftOffMainThread,
+  releaseIdleDraftWorker
 } from './utils/annotationDraftPersistenceWorker';
 import {
   buildScaffoldMaterialLibrary,
@@ -203,22 +213,6 @@ const DragOverlayText = styled.div`
   font-weight: 500;
 `;
 
-const CloudDraftStatusBadge = styled.div`
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 1200;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 18px;
-  color: ${props => props.$status === 'error' ? '#a8071a' : props.$status === 'saving' ? '#0958d9' : '#237804'};
-  background: ${props => props.$status === 'error' ? '#fff1f0' : props.$status === 'saving' ? '#e6f4ff' : '#f6ffed'};
-  border: 1px solid ${props => props.$status === 'error' ? '#ffccc7' : props.$status === 'saving' ? '#91caff' : '#b7eb8f'};
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-  pointer-events: none;
-`;
-
 const ReplaceDragFrame = styled.div`
   position: absolute;
   top: 16px;
@@ -260,7 +254,7 @@ const ContentContainer = styled.div`
   display: flex;
   flex: 1;
   overflow: hidden;
-  padding-top: var(--toolbar-height, 56px);
+  padding-top: calc(var(--toolbar-height, 56px) + var(--draft-status-height, 0px));
   box-sizing: border-box;
   min-height: 0;
 `;
@@ -423,7 +417,7 @@ function AppContent() {
     return {
       ...fileInfo,
       originalFingerprint: fileInfo.originalFingerprint || fileInfo.fingerprint,
-      fingerprint: `${sanitizeDraftKeyPart(fileInfo.fingerprint)}_project_${safeProjectId}`.slice(0, 128),
+      fingerprint: `${sanitizeDraftKeyPart(fileInfo.originalFingerprint || fileInfo.fingerprint)}_project_${safeProjectId}`.slice(0, 128),
       projectId: safeProjectId,
       originalProjectId: project.projectId,
       projectName: project.projectName
@@ -642,6 +636,7 @@ function AppContent() {
   
   // 调试按钮容器的ref，用于Portal渲染
   const debugButtonsContainerRef = useRef(null);
+  const pageCacheStatusContainerRef = useRef(null);
   
   // 标注规则相关状态
   const [annotationRules, setAnnotationRules] = useState([]);
@@ -688,11 +683,21 @@ function AppContent() {
   const localAnnotationDraftFullCheckpointVersionRef = useRef(1);
   const localAnnotationDraftCompletedFullVersionRef = useRef(0);
   const annotationDraftDirtyPageVersionsRef = useRef(new Map());
-  const annotationCheckpointPagesRef = useRef(new Set());
+  const annotationCheckpointPagesRef = useRef(new Map());
+  const annotationCheckpointIndexRef = useRef(null);
+  const annotationCheckpointRetryRef = useRef(null);
+  const [annotationCheckpointRetryNonce, setAnnotationCheckpointRetryNonce] = useState(0);
   const annotationCheckpointInFlightRef = useRef(false);
   const latestAutoBatchAnnotationRef = useRef(null);
   const previouslyIndexedAnnotationsRef = useRef([]);
   const startupDraftPromptShownRef = useRef(false);
+  const startupRecoveryHandlersRef = useRef({});
+  const pdfDraftSummaryRef = useRef(null);
+  const cloudRecoveryPrefetchRef = useRef(null);
+  const recoveryCompletionRef = useRef(null);
+  const [recoveryDialog, setRecoveryDialog] = useState({open: false});
+  const annotationEditRevisionRef = useRef(0);
+  const annotationEditSessionRef = useRef(`session_${Date.now()}_${Math.random().toString(36).slice(2)}`);
   const cloudAnnotationDraftSchedulerRef = useRef(null);
   const cloudAnnotationDraftGenerationRef = useRef(0);
   const localAnnotationDraftPendingSinceRef = useRef(null);
@@ -700,7 +705,9 @@ function AppContent() {
   const latestCloudAnnotationDraftRef = useRef(null);
   const cloudAnnotationDraftErrorShownRef = useRef(false);
   const cloudAnnotationDraftUnsupportedRef = useRef(false);
-  const [cloudAnnotationDraftStatus, setCloudAnnotationDraftStatus] = useState('idle');
+  const [, setCloudAnnotationDraftStatus] = useState('idle');
+  const draftSaveHealthRef = useRef(null);
+  if (!draftSaveHealthRef.current) draftSaveHealthRef.current = createDraftSaveHealth();
 
   // 添加选中标注状态
   const [selectedAnnotation, setSelectedAnnotation] = useState(null);
@@ -737,6 +744,9 @@ function AppContent() {
       return;
     }
     annotationDraftDirtyRef.current = true;
+    annotationEditRevisionRef.current += 1;
+    draftSaveHealthRef.current.edited(annotationEditRevisionRef.current);
+    setCloudAnnotationDraftStatus(status => status === 'saved' ? 'pending' : status);
     // Callers that cannot identify every affected page force one complete
     // checkpoint. Ordinary per-page annotation work supplies its page number
     // and thereafter sends only that page to the persistence worker.
@@ -757,7 +767,22 @@ function AppContent() {
     markAnnotationDraftDirty();
   }, [markAnnotationDraftDirty]);
 
+  // Observe committed page revisions rather than one particular editing entry
+  // point. This covers batches, moves, deletes and undo/redo alike.
+  useEffect(() => {
+    const previous = annotationCheckpointIndexRef.current;
+    annotationCheckpointIndexRef.current = annotationPageIndex;
+    if (!annotationDraftDirtyRef.current || !previous) return;
+    const changed = collectChangedAnnotationPages(previous, annotationPageIndex);
+    if (changed.length) {
+      markAnnotationDraftDirty(changed);
+      changed.forEach(page => annotationCheckpointPagesRef.current.set(
+        page, getPageAnnotationRevision(annotationPageIndex, page)));
+    }
+  }, [annotationPageIndex, markAnnotationDraftDirty]);
+
   const resetAnnotationDraftState = useCallback(() => {
+    draftSaveHealthRef.current.reset();
     cloudAnnotationDraftGenerationRef.current += 1;
     cloudAnnotationDraftSchedulerRef.current?.cancel();
     localAnnotationDraftPendingSinceRef.current = null;
@@ -770,8 +795,11 @@ function AppContent() {
     annotationDraftDirtyPageVersionsRef.current.clear();
     latestCloudAnnotationDraftRef.current = null;
     annotationCheckpointPagesRef.current.clear();
+    clearTimeout(annotationCheckpointRetryRef.current);
+    annotationCheckpointRetryRef.current = null;
     annotationCheckpointInFlightRef.current = false;
     cloudAnnotationDraftErrorShownRef.current = false;
+    cloudAnnotationDraftUnsupportedRef.current = false;
     setCloudAnnotationDraftStatus('idle');
     if (annotationDraftFlushTimerRef.current) {
       clearTimeout(annotationDraftFlushTimerRef.current);
@@ -791,6 +819,7 @@ function AppContent() {
     }
 
     setCloudAnnotationDraftStatus('saving');
+    draftSaveHealthRef.current.started('cloud');
     cloudAnnotationDraftSchedulerRef.current?.cancel();
     const generation = cloudAnnotationDraftGenerationRef.current;
 
@@ -799,8 +828,9 @@ function AppContent() {
       return saveCloudAnnotationDraftOffMainThread(currentDraft)
       .then((result) => {
         if (generation !== cloudAnnotationDraftGenerationRef.current) return result;
+        draftSaveHealthRef.current.saved('cloud', currentDraft.editRevision);
         cloudAnnotationDraftErrorShownRef.current = false;
-        setCloudAnnotationDraftStatus('saved');
+        setCloudAnnotationDraftStatus(currentDraft.editRevision === annotationEditRevisionRef.current ? 'saved' : 'pending');
         return result;
       })
       .catch((error) => {
@@ -808,13 +838,15 @@ function AppContent() {
         if (generation !== cloudAnnotationDraftGenerationRef.current) return null;
         console.warn('保存云端标注草稿失败:', error);
         setCloudAnnotationDraftStatus('error');
+        draftSaveHealthRef.current.failed('cloud', error?.status === 404
+          ? '云端草稿接口不可用，请联系管理员检查服务' : error);
         if (error?.status === 404) {
           cloudAnnotationDraftUnsupportedRef.current = true;
         }
         if (!cloudAnnotationDraftErrorShownRef.current) {
           message.warning(error?.status === 404
-            ? '当前 OCR 后端未升级云端草稿接口，请重启或更新 OCR 服务；本机草稿仍已保存'
-            : '云端标注草稿保存失败，本机草稿仍已保存');
+            ? '云端草稿接口不可用，请查看保存详情并联系管理员'
+            : '云端草稿保存失败，将自动重试；请留意工具栏下方的保存状态');
           cloudAnnotationDraftErrorShownRef.current = true;
         }
         if (error?.status !== 404) {
@@ -925,23 +957,23 @@ function AppContent() {
       currentPage: currentPageForDraftRef.current,
       scale,
       totalPages,
+      editSessionId: annotationEditSessionRef.current,
+      editRevision: annotationEditRevisionRef.current,
       updatedAt: new Date().toISOString()
     };
+    Object.defineProperty(draft, '__pageIndex', { value: annotationPageIndex });
     const dirtyPageVersions = new Map(annotationDraftDirtyPageVersionsRef.current);
-    const annotationPages = Array.from(new Set(
-      annotations.map(annotation => Math.max(1, Number(annotation?.page) || 1))
-    )).sort((left, right) => left - right);
+    const annotationPages = Array.from(annotationPageIndex.byPage.keys()).sort((left, right) => left - right);
     const fullCheckpointVersion = localAnnotationDraftFullCheckpointVersionRef.current;
     const requiresFullCheckpoint = !localAnnotationDraftInitializedRef.current ||
       localAnnotationDraftCompletedFullVersionRef.current < fullCheckpointVersion;
+    draft.checkpoint = requiresFullCheckpoint;
     let localDraft = draft;
     if (!requiresFullCheckpoint) {
       const dirtyPages = new Set(dirtyPageVersions.keys());
-      const annotationsByPage = new Map(Array.from(dirtyPages, page => [page, []]));
-      annotations.forEach(annotation => {
-        const page = Math.max(1, Number(annotation?.page) || 1);
-        if (annotationsByPage.has(page)) annotationsByPage.get(page).push(annotation);
-      });
+      const annotationsByPage = new Map(Array.from(dirtyPages, page => [
+        page, getPageAnnotations(annotationPageIndex, page)
+      ]));
       const draftMeta = { ...draft };
       delete draftMeta.annotations;
       localDraft = {
@@ -954,11 +986,13 @@ function AppContent() {
         }))
       };
     }
+    if (localDraft !== draft) Object.defineProperty(localDraft, '__pageIndex', { value: annotationPageIndex });
     const pendingSave = {
       localDraft,
       dirtyPageVersions,
       isFullCheckpoint: requiresFullCheckpoint,
-      fullCheckpointVersion
+      fullCheckpointVersion,
+      documentGeneration: cloudAnnotationDraftGenerationRef.current
     };
     latestAnnotationDraftRef.current = pendingSave;
     if (emergency) {
@@ -972,8 +1006,15 @@ function AppContent() {
       return annotationDraftSaveInFlightRef.current;
     }
 
-    const persistDraft = (saveRequest) => saveLocalAnnotationDraftOffMainThread(saveRequest.localDraft)
+    const persistDraft = (saveRequest) => {
+      if (saveRequest.documentGeneration === cloudAnnotationDraftGenerationRef.current) {
+        draftSaveHealthRef.current.started('local');
+      }
+      return saveLocalAnnotationDraftOffMainThread(saveRequest.localDraft)
       .then((savedDraft) => {
+        if (saveRequest.documentGeneration !== cloudAnnotationDraftGenerationRef.current) return savedDraft;
+        if (!savedDraft) throw new Error('本机草稿未返回成功回执');
+        draftSaveHealthRef.current.saved('local', saveRequest.localDraft.editRevision);
         annotationDraftSaveErrorShownRef.current = false;
         if (savedDraft) {
           window.__luotuLastLocalDraftSave = { ...savedDraft, completedAt: Date.now() };
@@ -997,6 +1038,8 @@ function AppContent() {
         return savedDraft;
       })
       .catch((error) => {
+        if (saveRequest.documentGeneration !== cloudAnnotationDraftGenerationRef.current) return null;
+        draftSaveHealthRef.current.failed('local', error);
         console.error('保存标注草稿失败:', error);
         if (!annotationDraftSaveErrorShownRef.current) {
           message.error('自动保存标注草稿失败，请尽快手动保存 PDF');
@@ -1012,11 +1055,23 @@ function AppContent() {
         }
         annotationDraftSaveInFlightRef.current = null;
       });
+    };
 
     annotationDraftSaveInFlightRef.current = persistDraft(pendingSave);
 
     return annotationDraftSaveInFlightRef.current;
-  }, [annotations, batchSequenceDraftState, pdfFile, pdfFileName, scale, scheduleCloudAnnotationDraftSave, totalPages, getCurrentProjectContext, getCurrentProjectDraftFileInfo]);
+  }, [annotations, annotationPageIndex, batchSequenceDraftState, pdfFile, pdfFileName, scale, scheduleCloudAnnotationDraftSave, totalPages, getCurrentProjectContext, getCurrentProjectDraftFileInfo]);
+
+  const handleRetryDraftSave = useCallback(async () => {
+    const generation = cloudAnnotationDraftGenerationRef.current;
+    // An explicit retry re-probes an interface that was previously missing.
+    cloudAnnotationDraftUnsupportedRef.current = false;
+    cloudAnnotationDraftSchedulerRef.current?.cancel();
+    await flushAnnotationDraft();
+    if (generation !== cloudAnnotationDraftGenerationRef.current) return;
+    const draft = latestCloudAnnotationDraftRef.current;
+    if (draft) await persistCloudAnnotationDraft(draft);
+  }, [flushAnnotationDraft, persistCloudAnnotationDraft]);
 
   useEffect(() => {
     if (
@@ -1055,27 +1110,38 @@ function AppContent() {
       isElectron() ||
       annotationCheckpointPagesRef.current.size < 10 ||
       annotationCheckpointInFlightRef.current ||
-      !annotationDraftDirtyRef.current
+      !annotationDraftDirtyRef.current || annotationCheckpointRetryRef.current
     ) return;
 
     annotationCheckpointInFlightRef.current = true;
-    annotationCheckpointPagesRef.current.clear();
+    const checkpointPages = new Map(annotationCheckpointPagesRef.current);
+    const checkpointGeneration = cloudAnnotationDraftGenerationRef.current;
     // A periodic full manifest repairs any interrupted/missing page shard.
     // Normal two-second saves between checkpoints remain page-delta only.
     localAnnotationDraftFullCheckpointVersionRef.current += 1;
+    const requiredCheckpointVersion = localAnnotationDraftFullCheckpointVersionRef.current;
     flushAnnotationDraft()
       .then(savedDraft => {
-        if (savedDraft) {
+        if (checkpointGeneration !== cloudAnnotationDraftGenerationRef.current) return;
+        if (savedDraft && localAnnotationDraftCompletedFullVersionRef.current >= requiredCheckpointVersion) {
+          acknowledgeCheckpointPages(annotationCheckpointPagesRef.current, checkpointPages);
           undoRedoSystem.trimHistory(5);
           window.dispatchEvent(new CustomEvent('luotu-annotation-memory-checkpoint', {
             detail: { currentPage: currentPageForDraftRef.current }
           }));
+        } else {
+          annotationCheckpointRetryRef.current = setTimeout(() => {
+            annotationCheckpointRetryRef.current = null;
+            setAnnotationCheckpointRetryNonce(value => value + 1);
+          }, 30000);
         }
       })
       .finally(() => {
-        annotationCheckpointInFlightRef.current = false;
+        if (checkpointGeneration === cloudAnnotationDraftGenerationRef.current) annotationCheckpointInFlightRef.current = false;
       });
-  }, [annotations, flushAnnotationDraft, undoRedoSystem]);
+  }, [annotations, flushAnnotationDraft, undoRedoSystem, annotationCheckpointRetryNonce]);
+
+  useEffect(() => () => clearTimeout(annotationCheckpointRetryRef.current), []);
 
   useEffect(() => {
     if (isElectron()) {
@@ -5099,12 +5165,16 @@ function AppContent() {
   ]);
 
   // 从PDF元数据中读取标注信息
+  useEffect(() => () => {cancelPdfMetadataRead(); releaseIdleDraftWorker();}, []);
+
   const loadAnnotationsFromPDFMetadata = useCallback(async (file) => {
+    const generation = cloudAnnotationDraftGenerationRef.current;
     const annotationIdsAtLoadStart = new Set(
       annotationsRef.current.map(annotation => annotation.id)
     );
 
     const applyLoadedAnnotations = (loadedAnnotations) => {
+      if (generation !== cloudAnnotationDraftGenerationRef.current) return;
       const normalizedLoadedAnnotations = normalizeTextRectangleAnnotations(loadedAnnotations);
       // Metadata may finish loading after a user has already started marking.
       // The next local save must therefore reconcile every page, not assume
@@ -5124,320 +5194,22 @@ function AppContent() {
     };
 
     const clearLoadedAnnotations = () => {
+      if (generation !== cloudAnnotationDraftGenerationRef.current) return;
       localAnnotationDraftFullCheckpointVersionRef.current += 1;
       setAnnotations(prev => prev.filter(annotation => !annotationIdsAtLoadStart.has(annotation.id)));
     };
 
     try {
-      const { PDFDocument } = window.PDFLib;
-      
-      // 获取PDF文件的ArrayBuffer
-      let arrayBuffer;
-      if (typeof file === 'string') {
-        // 如果是URL，需要先获取ArrayBuffer
-        const response = await fetch(file);
-        arrayBuffer = await response.arrayBuffer();
-      } else if (file instanceof File) {
-        // 如果是File对象
-        arrayBuffer = await file.arrayBuffer();
-      } else {
-        return;
-      }
-      
-      // 加载PDF文档
-      const pdfDoc = await PDFDocument.load(arrayBuffer);
-
-      // 检测PDF页面旋转角度和基本信息
-      const pages = pdfDoc.getPages();
-
-
-      // 检测所有页面的旋转角度（静默检测，不输出）
-      for (let i = 0; i < pages.length; i++) {
-        const page = pages[i];
-        const { width, height } = page.getSize();
-        const rotation = page.getRotation() || 0; // 确保是数字
-        const rotationDegrees = typeof rotation === 'object' ? (rotation.angle || 0) : rotation;
-        const isLandscape = width > height;
-        const orientation = isLandscape ? '横向' : '纵向';
-
-        // 静默检测，不输出日志
+      const payload = await readPdfMetadata(file, {useWorker: !isElectron()});
+      const {keywordString, hasImageAnnotations} = payload;
+      let {annotationData, loadMethod} = payload;
+      let loadedAnnotationResult = payload.error ? {error: payload.error} : null;
+      if (payload.error) {
+        const error = new Error(payload.error);
+        message.warning('PDF 标注附件读取失败，可通过“恢复草稿”选择本机或云端版本');
+        console.warn('读取当前 PDF 附件失败:', error);
       }
 
-      // 检测PDF是否包含图像标注（通过检查页面内容）
-      let hasImageAnnotations = false;
-      
-      try {
-        // 简单检测：如果PDF有多个图像对象，可能包含嵌入的标注图像
-        for (let i = 0; i < Math.min(pages.length, 3); i++) { // 只检查前3页以提高性能
-          const page = pages[i];
-          const resources = page.node.Resources;
-          if (resources && resources.XObject) {
-            const xObjects = Object.keys(resources.XObject);
-            if (xObjects.length > 1) { // 如果有多个图像对象，可能包含标注图像
-              hasImageAnnotations = true;
-              break;
-            }
-          }
-        }
-      } catch (detectError) {
-        console.warn('⚠️ 检测图像标注失败，继续加载:', detectError);
-      }
-      
-      // 安全读取标准元数据中的标注数据（从Keywords字段或附件）
-      let keywords = null;
-      let keywordString = '';
-      let annotationData = null;
-      let loadedAnnotationResult = null;
-      let loadMethod = null; // 记录加载方式
-      
-      try {
-        keywords = pdfDoc.getKeywords();
-        keywordString = Array.isArray(keywords) ? keywords.join(' ') : (keywords || '');
-      } catch (keywordError) {
-        console.warn('⚠️ 读取PDF Keywords失败，跳过元数据标注加载:', keywordError.message);
-        keywords = null;
-        keywordString = '';
-      }
-      
-      // 检查是否使用了附件存储
-      if (keywordString && keywordString.includes('ANNOTATION_DATA:PDF标注查看器:1.0:ATTACHMENT')) {
-        console.log('📎 检测到附件标记，尝试从PDF附件读取标注数据...');
-        
-        try {
-          const { PDFName } = window.PDFLib;
-          let foundAttachment = false;
-          
-          // 方法1: 通过Names字典查找附件
-          try {
-            const catalog = pdfDoc.catalog;
-            const namesDict = catalog.get(PDFName.of('Names'));
-            
-            if (namesDict) {
-              const embeddedFilesDict = namesDict.get(PDFName.of('EmbeddedFiles'));
-              
-              if (embeddedFilesDict) {
-                const namesArray = embeddedFilesDict.get(PDFName.of('Names'));
-                
-                if (namesArray && Array.isArray(namesArray)) {
-                  // namesArray 格式: [name1, ref1, name2, ref2, ...]
-                  for (let i = 0; i < namesArray.length; i += 2) {
-                    const fileName = namesArray[i];
-                    const fileRef = namesArray[i + 1];
-                    
-                    // 检查文件名
-                    const fileNameStr = fileName?.toString().replace(/[()]/g, '');
-                    if (fileNameStr === 'annotations.json' && fileRef) {
-                      console.log('🔍 找到附件引用，正在读取...');
-                      
-                      // 获取文件规范对象
-                      const fileSpecObj = pdfDoc.context.lookup(fileRef);
-                      
-                      if (fileSpecObj) {
-                        const efDict = fileSpecObj.get(PDFName.of('EF'));
-                        if (efDict) {
-                          const embeddedFileRef = efDict.get(PDFName.of('F'));
-                          if (embeddedFileRef) {
-                            const embeddedFileStream = pdfDoc.context.lookup(embeddedFileRef);
-                            
-                            if (embeddedFileStream) {
-                              try {
-                                // pdf-lib的流对象需要解压缩
-                                let attachmentBytes = null;
-                                
-                                // 优先使用decode方法（解压）
-                                if (typeof embeddedFileStream.decode === 'function') {
-                                  attachmentBytes = embeddedFileStream.decode();
-                                } else if (embeddedFileStream.contents) {
-                                  attachmentBytes = embeddedFileStream.contents;
-                                } else if (embeddedFileStream.getContents) {
-                                  attachmentBytes = embeddedFileStream.getContents();
-                                }
-                                
-                                if (attachmentBytes) {
-                                  // 读取附件内容
-                                  const decoder = new TextDecoder();
-                                  const jsonString = decoder.decode(attachmentBytes);
-                                  
-                                  // 解析JSON数据
-                                  annotationData = JSON.parse(jsonString);
-                                  loadMethod = 'attachment';
-                                  foundAttachment = true;
-                                  console.log(`✅ 成功从PDF附件读取 ${annotationData.annotations?.length || 0} 个标注`);
-                                  break;
-                                }
-                              } catch (parseError) {
-                                console.error('❌ 解析附件JSON失败:', parseError);
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          } catch (namesError) {
-            console.warn('⚠️ 通过Names字典读取失败:', namesError.message);
-          }
-          
-          // 方法2: 如果方法1失败，遍历所有对象查找附件
-          if (!foundAttachment) {
-            console.log('🔍 尝试遍历所有对象查找附件...');
-            const attachmentRefs = pdfDoc.context.enumerateIndirectObjects();
-            
-            for (const [ref, obj] of attachmentRefs) {
-              try {
-                // 检查是否是文件规范（附件）对象
-                if (obj && obj.dict) {
-                  const typeObj = obj.dict.get(PDFName.of('Type'));
-                  if (typeObj?.toString() === '/Filespec') {
-                    // 检查文件名
-                    const fName = obj.dict.get(PDFName.of('F')) || obj.dict.get(PDFName.of('UF'));
-                    const fileName = fName?.toString().replace(/[()]/g, '');
-                    
-                    if (fileName === 'annotations.json') {
-                      console.log('🔍 找到annotations.json附件，正在读取...');
-                      
-                      const efDict = obj.dict.get(PDFName.of('EF'));
-                      console.log('🔍 EF字典:', efDict ? '存在' : '不存在');
-                      
-                      if (efDict) {
-                        const embeddedFileRef = efDict.get(PDFName.of('F'));
-                        console.log('🔍 嵌入文件引用:', embeddedFileRef ? '存在' : '不存在');
-                        
-                        if (embeddedFileRef) {
-                          const embeddedFileStream = pdfDoc.context.lookup(embeddedFileRef);
-                          console.log('🔍 嵌入文件流:', embeddedFileStream ? '存在' : '不存在');
-                          
-                            if (embeddedFileStream) {
-                              try {
-                                // pdf-lib的流对象需要解压缩
-                                let attachmentBytes = null;
-                                
-                                // 检查流的类型和属性
-                                const streamType = embeddedFileStream.constructor.name;
-                                console.log('🔍 流对象类型:', streamType);
-                                console.log('🔍 流对象属性:', Object.keys(embeddedFileStream).join(', '));
-                                
-                                // 检查是否有Filter（表示数据被压缩）
-                                const { PDFName } = window.PDFLib;
-                                const filter = embeddedFileStream.dict?.get(PDFName.of('Filter'));
-                                const hasFlateFilter = filter?.toString().includes('FlateDecode');
-                                console.log('🔍 是否使用FlateDecode压缩:', hasFlateFilter);
-                                
-                                // 方法1: 尝试使用pdf-lib的解压功能
-                                if (hasFlateFilter || streamType.includes('Raw')) {
-                                  console.log('🔧 尝试手动解压数据...');
-                                  
-                                  // 使用pako库解压（pdf-lib内部使用的）
-                                  if (window.pako) {
-                                    try {
-                                      const compressedData = embeddedFileStream.contents;
-                                      attachmentBytes = window.pako.inflate(compressedData);
-                                      console.log('✅ 使用pako成功解压');
-                                    } catch (pakoError) {
-                                      console.warn('⚠️ pako解压失败:', pakoError.message);
-                                    }
-                                  }
-                                  
-                                  // 如果pako不可用，尝试decode方法
-                                  if (!attachmentBytes && typeof embeddedFileStream.decode === 'function') {
-                                    try {
-                                      attachmentBytes = embeddedFileStream.decode();
-                                      console.log('✅ 使用decode方法解压');
-                                    } catch (decErr) {
-                                      console.warn('⚠️ decode方法失败:', decErr.message);
-                                    }
-                                  }
-                                  
-                                  // 如果还是失败，尝试手动使用CompressionStream API
-                                  if (!attachmentBytes && embeddedFileStream.contents) {
-                                    try {
-                                      // 尝试使用浏览器的DecompressionStream API
-                                      if (typeof DecompressionStream !== 'undefined') {
-                                        const compressedData = embeddedFileStream.contents;
-                                        const ds = new DecompressionStream('deflate');
-                                        const writer = ds.writable.getWriter();
-                                        writer.write(compressedData);
-                                        writer.close();
-                                        const reader = ds.readable.getReader();
-                                        const chunks = [];
-                                        let result;
-                                        while (!(result = await reader.read()).done) {
-                                          chunks.push(result.value);
-                                        }
-                                        const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-                                        attachmentBytes = new Uint8Array(totalLength);
-                                        let offset = 0;
-                                        for (const chunk of chunks) {
-                                          attachmentBytes.set(chunk, offset);
-                                          offset += chunk.length;
-                                        }
-                                        console.log('✅ 使用DecompressionStream解压');
-                                      }
-                                    } catch (dsErr) {
-                                      console.warn('⚠️ DecompressionStream失败:', dsErr.message);
-                                    }
-                                  }
-                                } else {
-                                  // 未压缩，直接读取
-                                  console.log('✅ 数据未压缩，直接读取');
-                                  attachmentBytes = embeddedFileStream.contents;
-                                }
-                                
-                                if (attachmentBytes) {
-                                  console.log('📊 解压后数据大小:', attachmentBytes.length, 'bytes');
-                                  
-                                  // 读取附件内容
-                                  const decoder = new TextDecoder();
-                                  const jsonString = decoder.decode(attachmentBytes);
-                                  console.log('📝 JSON字符串长度:', jsonString.length);
-                                  console.log('📝 JSON开头:', jsonString.substring(0, 100));
-                                  
-                                  // 验证是否是有效的JSON
-                                  if (jsonString.startsWith('{') || jsonString.startsWith('[')) {
-                                    // 解析JSON数据
-                                    annotationData = JSON.parse(jsonString);
-                                    loadMethod = 'attachment';
-                                    foundAttachment = true;
-                                    const loadedCount = annotationData.annotations?.length || 0;
-                                    console.log(`✅ 成功从PDF附件读取 ${loadedCount} 个标注`);
-                                    break;
-                                  } else {
-                                    console.error('❌ 数据仍然是压缩格式或损坏');
-                                  }
-                                } else {
-                                  console.warn('⚠️ 无法读取附件内容');
-                                }
-                              } catch (decodeError) {
-                                console.error('❌ 解压或解析附件失败:', decodeError);
-                                console.error('错误详情:', decodeError.stack);
-                              }
-                            }
-                        }
-                      }
-                    }
-                  }
-                }
-              } catch (objError) {
-                // 跳过无法处理的对象
-                continue;
-              }
-            }
-          }
-          
-          if (!foundAttachment) {
-            console.warn('⚠️ 未找到标注附件，可能保存时出现了问题');
-            console.warn('💡 建议：重新保存PDF以修复此问题');
-          }
-        } catch (attachError) {
-          console.error('❌ 从附件读取标注失败:', attachError);
-          console.log('尝试从Keywords字段读取...');
-        }
-      }
-      
-      // 如果没有从附件读取到数据，尝试从Keywords读取
       if (!annotationData && keywordString && keywordString.includes('ANNOTATION_DATA:')) {
         try {
           // 解析格式：ANNOTATION_DATA:工具名称:版本:JSON数据 或 ANNOTATION_DATA:工具名称:版本:ATTACHMENT
@@ -5527,9 +5299,11 @@ function AppContent() {
       }
       return loadedAnnotationResult;
     } catch (error) {
+      if (error?.name === 'AbortError') return;
       console.error('❌ 读取PDF元数据失败:', error);
-      // 不显示错误消息，因为大多数PDF都没有标注数据
+      message.warning('PDF 内标注读取失败，可重新打开 PDF 或通过“恢复草稿”查询本机和云端版本');
       clearLoadedAnnotations();
+      return {error: error.message};
     }
   }, []);
 
@@ -5546,81 +5320,51 @@ function AppContent() {
   }, [getDraftUpdatedTime]);
 
   const restoreAnnotationDraftData = useCallback((draft, sourceLabel = '草稿') => {
-    if (!draft || !Array.isArray(draft.annotations)) {
-      return;
-    }
+    const validation = validateRecoveryDraft(draft);
+    if (!validation.valid) throw new Error(validation.reason);
 
     setAnnotations(normalizeTextRectangleAnnotations(draft.annotations));
     setBatchSequenceDraftState(draft.batchSequenceState || null);
     setCurrentPage(draft.currentPage || 1);
     setScale(draft.scale || 1);
     annotationDraftDirtyRef.current = true;
+    annotationEditRevisionRef.current += 1;
+    draftSaveHealthRef.current.edited(annotationEditRevisionRef.current);
+    localAnnotationDraftFullCheckpointVersionRef.current += 1;
+    setCloudAnnotationDraftStatus('pending');
     message.success(`已恢复 ${draft.annotations.length} 条${sourceLabel}标注`);
+    return true;
   }, []);
 
   const maybeRestoreCloudAnnotationDraft = useCallback(async (selectedFileInfo, pdfDraftSummary = null, localDraft = null) => {
-    if (isElectron() || !selectedFileInfo?.fingerprint) {
+    if (isElectron() || !selectedFileInfo?.fingerprint) return false;
+    const fileInfo = getCurrentProjectDraftFileInfo(selectedFileInfo);
+    const prefetched = cloudRecoveryPrefetchRef.current;
+    const generation = cloudAnnotationDraftGenerationRef.current;
+    const cloudState = await (prefetched?.fingerprint === fileInfo.fingerprint ? prefetched.promise
+      : loadCloudAnnotationDraft(fileInfo.fingerprint, fileInfo.recoveryUserKey)
+        .then(draft => ({draft})).catch(error => ({error: error.message})));
+    if (generation !== cloudAnnotationDraftGenerationRef.current) return false;
+    if (cloudState.error) setCloudAnnotationDraftStatus('error');
+    const matchingCloud = cloudState.draft && isSamePdfDraftFile(cloudState.draft.fileInfo, fileInfo);
+    const matchingLocal = localDraft && isSamePdfDraftFile(localDraft.fileInfo, fileInfo);
+    if (!matchingCloud && !matchingLocal) {
+      cloudRecoveryPrefetchRef.current = null;
+      if (cloudState.error) message.warning('云端草稿查询失败，可点击“恢复草稿”重新查询');
       return false;
     }
-
-    try {
-      const projectFileInfo = getCurrentProjectDraftFileInfo(selectedFileInfo);
-      const cloudDraft = await loadCloudAnnotationDraft(projectFileInfo.fingerprint);
-      if (
-        !cloudDraft ||
-        !Array.isArray(cloudDraft.annotations) ||
-        cloudDraft.annotations.length === 0 ||
-        !isSamePdfDraftFile(cloudDraft.fileInfo, selectedFileInfo)
-      ) {
-        return false;
-      }
-
-      const pdfSummary = pdfDraftSummary?.annotations ? {
-        updatedAt: pdfDraftSummary.updatedAt,
-        annotations: pdfDraftSummary.annotations
-      } : null;
-      const latestLocalOrPdfTime = Math.max(
-        getDraftUpdatedTime(localDraft),
-        getDraftUpdatedTime(pdfSummary)
-      );
-      const cloudTime = getDraftUpdatedTime(cloudDraft);
-
-      if (cloudTime <= latestLocalOrPdfTime) {
-        return false;
-      }
-
-      return await new Promise((resolve) => {
-        Modal.confirm({
-          title: '发现更新的云端标注草稿',
-          content: (
-            <div>
-              <p>当前 PDF 在 OCR 后端有一份更新的云端草稿。</p>
-              <p>PDF 文件内标注：{pdfSummary?.annotations?.length || 0} 条，{formatDraftTime(pdfSummary)}</p>
-              <p>本机草稿：{localDraft?.annotations?.length || 0} 条，{formatDraftTime(localDraft)}</p>
-              <p>云端草稿：{cloudDraft.annotations.length} 条，{formatDraftTime(cloudDraft)}</p>
-              <p>推荐恢复云端草稿。</p>
-            </div>
-          ),
-          okText: '恢复云端草稿',
-          cancelText: '保留当前标注',
-          onOk: () => {
-            restoreAnnotationDraftData(cloudDraft, '云端草稿');
-            resolve(true);
-          },
-          onCancel: () => resolve(false),
-        });
-      });
-    } catch (error) {
-      console.warn('查询云端标注草稿失败:', error);
-      if (error?.status === 404) {
-        cloudAnnotationDraftUnsupportedRef.current = true;
-      }
-      setCloudAnnotationDraftStatus('error');
-      return false;
-    }
+    return new Promise(resolve => {
+      recoveryCompletionRef.current?.(false);
+      recoveryCompletionRef.current = resolve;
+      setRecoveryDialog({open: true, fileInfo,
+        localDraft: matchingLocal ? localDraft : null, cloudState, pdfSummary: pdfDraftSummary,
+        onFinished: resolve});
+    });
   }, [formatDraftTime, getDraftUpdatedTime, restoreAnnotationDraftData, getCurrentProjectDraftFileInfo]);
 
   const handleFileSelect = useCallback(async (file, options = {}) => {
+    cancelPdfMetadataRead();
+    releaseIdleDraftWorker();
     // 性能监控：记录开始时间
     const startTime = Date.now();
 
@@ -5636,6 +5380,13 @@ function AppContent() {
       ? await loadLatestAnnotationDraft()
       : options.localDraft || null;
     resetAnnotationDraftState();
+    pdfDraftSummaryRef.current = null;
+    const openingGeneration = cloudAnnotationDraftGenerationRef.current;
+    currentPdfDraftInfoRef.current = null;
+    cloudRecoveryPrefetchRef.current = null;
+    setAnnotations([]);
+    setBatchSequenceDraftState(null);
+    setTotalPages(0);
 
     setPdfFile(file);
     setPdfFileName(fileName);
@@ -5674,13 +5425,17 @@ function AppContent() {
         recordedAt: Date.now()
       };
       if (!isElectron()) {
-        currentPdfDraftInfoRef.current = await buildPdfDraftFileInfo(file, arrayBuffer || null);
+        const info = await buildPdfDraftFileInfo(file, arrayBuffer || null);
+        if (openingGeneration !== cloudAnnotationDraftGenerationRef.current) return;
+        currentPdfDraftInfoRef.current = info;
       }
     } catch (error) {
       console.error('❌ 读取PDF文件内容失败:', error);
       setPdfArrayBuffer(null);
       if (!isElectron()) {
-        currentPdfDraftInfoRef.current = await buildPdfDraftFileInfo(file);
+        const info = await buildPdfDraftFileInfo(file);
+        if (openingGeneration !== cloudAnnotationDraftGenerationRef.current) return;
+        currentPdfDraftInfoRef.current = info;
       }
     }
     
@@ -5723,22 +5478,24 @@ function AppContent() {
     // 重置所有页面的识别状态
     setPageRecognitionData({});
 
-    // 尝试从PDF元数据中加载标注信息
-    const pdfAnnotationResult = await loadAnnotationsFromPDFMetadata(file);
-    if (!options.skipCloudDraftPrompt && currentPdfDraftInfoRef.current) {
-      const matchingLocalDraft = isSamePdfDraftFile(openingDraft?.fileInfo, currentPdfDraftInfoRef.current)
-        ? openingDraft : null;
-      const restoredCloud = await maybeRestoreCloudAnnotationDraft(currentPdfDraftInfoRef.current, pdfAnnotationResult, matchingLocalDraft);
-      if (!restoredCloud && matchingLocalDraft && getDraftUpdatedTime(matchingLocalDraft) > getDraftUpdatedTime(pdfAnnotationResult)) {
-        await new Promise(resolve => Modal.confirm({
-          title: '发现可恢复的本机标注草稿',
-          content: `找到 ${matchingLocalDraft.annotations.length} 条标注。下载可能未完成，是否恢复这份草稿？`,
-          okText: '恢复本机草稿',
-          cancelText: '保留 PDF 标注',
-          onOk: () => { restoreAnnotationDraftData(matchingLocalDraft, '本机草稿'); resolve(); },
-          onCancel: () => resolve(),
-        }));
+    if (currentPdfDraftInfoRef.current) {
+      const info = currentPdfDraftInfoRef.current;
+      currentPdfDraftInfoRef.current = {...info, recoveryUserKey: info.recoveryUserKey || getAnnotationDraftUserKey()};
+      const scopedInfo = getCurrentProjectDraftFileInfo(currentPdfDraftInfoRef.current);
+      if (!options.skipCloudDraftPrompt) {
+        cloudRecoveryPrefetchRef.current = {fingerprint: scopedInfo.fingerprint,
+          promise: loadCloudAnnotationDraft(scopedInfo.fingerprint, scopedInfo.recoveryUserKey)
+            .then(draft => ({draft})).catch(error => ({error: error.message}))};
+        const matchingLocalDraft = isSamePdfDraftFile(openingDraft?.fileInfo, scopedInfo) ? openingDraft : null;
+        const restored = await maybeRestoreCloudAnnotationDraft(currentPdfDraftInfoRef.current, null, matchingLocalDraft);
+        if (openingGeneration !== cloudAnnotationDraftGenerationRef.current) return;
+        if (restored) return;
       }
+    }
+    if (!options.skipPdfMetadata) {
+      const summary = await loadAnnotationsFromPDFMetadata(file);
+      if (openingGeneration !== cloudAnnotationDraftGenerationRef.current) return;
+      pdfDraftSummaryRef.current = summary;
     }
 
     // 性能监控：记录加载时间
@@ -5919,12 +5676,22 @@ function AppContent() {
     }
   }, [handleFileSelect, requestH3ProjectSelection]);
 
-  const handleRestoreAnnotationDraft = useCallback(async (draft) => {
+  const handleRestoreAnnotationDraft = useCallback(async (draft, sourceLabel = '本机草稿') => {
     if (!draft) {
       return;
     }
 
     try {
+      const validation = validateRecoveryDraft(draft);
+      if (!validation.valid) throw new Error(validation.reason);
+      if (pdfFile && currentPdfDraftInfoRef.current && isSamePdfDraftFile(draft.fileInfo, getCurrentProjectDraftFileInfo(currentPdfDraftInfoRef.current))) {
+        const pageCount = currentPdfDraftInfoRef.current.pageCount || totalPages;
+        if (pageCount && draft.totalPages && Number(pageCount) !== Number(draft.totalPages)) throw new Error('草稿页数与当前 PDF 不一致，请选择对应图纸');
+        const generation = cloudAnnotationDraftGenerationRef.current;
+        await flushAnnotationDraft();
+        if (generation !== cloudAnnotationDraftGenerationRef.current) throw new Error('图纸已切换，请重新选择恢复版本');
+        return restoreAnnotationDraftData(draft, sourceLabel);
+      }
       if (draft.project?.projectName || draft.fileInfo?.projectName) {
         const restoredProject = {
           name: draft.project?.projectName || draft.fileInfo?.projectName,
@@ -5940,31 +5707,40 @@ function AppContent() {
 
       if (!isSamePdfDraftFile(draft.fileInfo, selectedFileInfo)) {
         message.error('选择的 PDF 与草稿记录不匹配，请选择原来的 PDF 文件');
-        return;
+        return false;
       }
 
-      await handleFileSelect(result.file, { preserveDraft: true, skipCloudDraftPrompt: true });
-      currentPdfDraftInfoRef.current = selectedFileInfo;
-      const restoredCloudDraft = await maybeRestoreCloudAnnotationDraft(selectedFileInfo, null, draft);
-      if (!restoredCloudDraft) {
-        restoreAnnotationDraftData(draft, '本机草稿');
-      }
-      message.success(`已恢复 ${draft.annotations?.length || 0} 条未保存标注草稿`);
+      await handleFileSelect(result.file, { preserveDraft: true, skipCloudDraftPrompt: true, skipPdfMetadata: true });
+      currentPdfDraftInfoRef.current = {...selectedFileInfo, recoveryUserKey: draft.fileInfo?.recoveryUserKey || selectedFileInfo.recoveryUserKey || getAnnotationDraftUserKey()};
+      return restoreAnnotationDraftData(draft, sourceLabel);
     } catch (error) {
       if (error?.message?.includes('取消')) {
-        return;
+        return false;
       }
       console.error('恢复标注草稿失败:', error);
       message.error(`恢复标注草稿失败: ${error.message}`);
+      return false;
     }
-  }, [handleFileSelect, maybeRestoreCloudAnnotationDraft, restoreAnnotationDraftData]);
+  }, [handleFileSelect, restoreAnnotationDraftData, getCurrentProjectDraftFileInfo, pdfFile, totalPages, flushAnnotationDraft]);
+
+  const handleOpenDraftRecovery = useCallback(() => {
+    const fileInfo = getCurrentProjectDraftFileInfo(currentPdfDraftInfoRef.current);
+    setRecoveryDialog(current => current.open ? current : {open: true, fileInfo, pdfSummary: pdfDraftSummaryRef.current});
+  }, [getCurrentProjectDraftFileInfo]);
+  const handleCloseDraftRecovery = useCallback(restored => {
+    const finish = recoveryCompletionRef.current;
+    recoveryCompletionRef.current = null;
+    cloudRecoveryPrefetchRef.current = null;
+    setRecoveryDialog({open: false});
+    finish?.(restored);
+  }, []);
+  startupRecoveryHandlersRef.current = {restore: handleRestoreAnnotationDraft};
 
   useEffect(() => {
     if (isElectron() || startupDraftPromptShownRef.current) {
       return;
     }
 
-    startupDraftPromptShownRef.current = true;
     let active = true;
 
     loadLatestAnnotationDraft().then((draft) => {
@@ -5973,6 +5749,7 @@ function AppContent() {
       }
 
       latestAnnotationDraftRef.current = draft;
+      startupDraftPromptShownRef.current = true;
       Modal.confirm({
         title: '发现未保存的标注草稿',
         content: (
@@ -5982,20 +5759,19 @@ function AppContent() {
               文件：{draft.fileInfo?.name || draft.fileName || '未知 PDF'}，
               标注：{draft.annotations?.length || 0} 条
             </p>
-            <p>请选择原 PDF 文件后恢复标注，或丢弃这份草稿。</p>
+            <p>请选择原 PDF 文件后恢复标注，也可以稍后从“恢复草稿”入口继续；关闭提示不会删除草稿。</p>
           </div>
         ),
         okText: '选择原 PDF 并恢复',
-        cancelText: '丢弃草稿',
-        onOk: () => handleRestoreAnnotationDraft(draft),
-        onCancel: () => discardLatestAnnotationDraft(),
+        cancelText: '稍后恢复',
+        onOk: () => startupRecoveryHandlersRef.current.restore(draft),
       });
-    });
+    }).catch(error => { if (active) console.warn('启动草稿检查失败，可通过恢复入口重试:', error); });
 
     return () => {
       active = false;
     };
-  }, [discardLatestAnnotationDraft, handleRestoreAnnotationDraft]);
+  }, []);
 
   const clearDragHintTimer = useCallback(() => {
     if (dragStateRef.current.timer) {
@@ -6334,9 +6110,6 @@ function AppContent() {
         // new page's dirty flag.
         setAnnotations(prev => {
           markAnnotationDraftDirty(newAnnotation.page);
-          if (Number(newAnnotation.page) > 0) {
-            annotationCheckpointPagesRef.current.add(Number(newAnnotation.page));
-          }
           return [...prev, newAnnotation];
         });
         setNewlyAddedAnnotations(prev => {
@@ -7206,7 +6979,7 @@ function AppContent() {
       if (result.success) {
         // 🚀 性能优化：直接使用刚生成的pdfBytes更新缓存，避免重新读取文件
         // 这样可以节省大量时间（特别是大文件）
-        if (pdfBytes.byteLength <= MAX_RESIDENT_PDF_BUFFER_BYTES) {
+        if (!(pdfBytes instanceof Blob) && pdfBytes.byteLength <= MAX_RESIDENT_PDF_BUFFER_BYTES) {
           setPdfArrayBuffer(pdfBytes.buffer.slice(pdfBytes.byteOffset, pdfBytes.byteOffset + pdfBytes.byteLength));
           console.log('✅ 已更新PDF缓存（使用生成的数据，无需重新读取）');
         } else {
@@ -7214,14 +6987,14 @@ function AppContent() {
           // 不为大输出再永久保留一份完整连续 ArrayBuffer。
           setPdfArrayBuffer(null);
           console.log('♻️ 保存结果超过64MB，不保留常驻PDF副本:', {
-            sizeMB: (pdfBytes.byteLength / 1024 / 1024).toFixed(2)
+            sizeMB: ((pdfBytes.size ?? pdfBytes.byteLength) / 1024 / 1024).toFixed(2)
           });
         }
         window.__luotuPdfResidentBufferInfo = {
-          fileBytes: Number(pdfBytes.byteLength || 0),
+          fileBytes: Number(pdfBytes.size ?? pdfBytes.byteLength ?? 0),
           retainedArrayBufferBytes: pdfBytes.byteLength <= MAX_RESIDENT_PDF_BUFFER_BYTES
             ? Number(pdfBytes.byteLength) : 0,
-          largeFileOnDemand: pdfBytes.byteLength > MAX_RESIDENT_PDF_BUFFER_BYTES,
+          largeFileOnDemand: pdfBytes instanceof Blob || pdfBytes.byteLength > MAX_RESIDENT_PDF_BUFFER_BYTES,
           recordedAt: Date.now()
         };
         
@@ -7381,9 +7154,7 @@ function AppContent() {
       };
       
       // 创建新标注
-      const latestAutoBatchAnnotation = [...annotations]
-        .reverse()
-        .find(item => item?.isBatchGenerated && getAnnotationOrigin(item) === 'auto' && item.batchRunId);
+      const latestAutoBatchAnnotation = latestAutoBatchAnnotationRef.current;
       const newAnnotation = normalizeTextRectangleAnnotation({
         ...annotationWithRule,
         // 如果标注已经有ID，保持原ID；否则生成新ID
@@ -7411,7 +7182,6 @@ function AppContent() {
       // 保存当前状态
       const oldRule = { ...activeAnnotationRule };
       const oldRules = [...annotationRules];
-      const oldAnnotations = [...annotations];
       const oldContinuousRuleNumber = continuousRuleNumber;
       
       // 更新规则的当前序号
@@ -7440,7 +7210,10 @@ function AppContent() {
         description: `添加规则标注: ${newAnnotation.text}`,
         execute: () => {
           // 批量更新所有状态，React 18 会自动合并渲染
-          setAnnotations(prev => [...prev, newAnnotation]);
+          setAnnotations(prev => {
+            markAnnotationDraftDirty(newAnnotation.page);
+            return [...prev, newAnnotation];
+          });
           if (continuousRuleNumberingEnabled) {
             // 连续模式只推进共享焊口号，不覆盖各条规则原有的独立序号。
             setContinuousRuleNumber(currentNum !== undefined && currentNum !== null ? currentNum + 1 : 1);
@@ -7464,7 +7237,10 @@ function AppContent() {
         },
         undo: () => {
           // 只移除新添加的标注，保持其他标注的当前状态
-          setAnnotations(prev => prev.filter(ann => ann.id !== newAnnotation.id));
+          setAnnotations(prev => {
+            markAnnotationDraftDirty(newAnnotation.page);
+            return prev.filter(ann => ann.id !== newAnnotation.id);
+          });
           if (continuousRuleNumberingEnabled) {
             setContinuousRuleNumber(oldContinuousRuleNumber);
           } else {
@@ -9625,365 +9401,29 @@ function AppContent() {
         console.log(`✅ 所有标注渲染完成，总耗时: ${(t1 - t0).toFixed(2)}ms`);
     }
     
-    // 将标注信息保存到PDF元数据中（根据参数决定是否保存）
+    // Use one active attachment for every payload size, avoiding stale Keywords
+    // and attachment copies becoming competing sources on the next open.
     if (saveMetadata) {
       onProgress?.({ phase: 'metadata' });
-      try {
-        console.log('💾 正在将标注信息保存到PDF...');
-        
-        // 准备要保存的标注数据
-        const annotationData = {
-          annotations: annotations,
-          timestamp: new Date().toISOString(),
-          version: '1.0'
-        };
-        
-        // 将标注数据序列化为JSON字符串
-        const annotationJSON = JSON.stringify(annotationData);
-        const annotationSize = new Blob([annotationJSON]).size;
-        
-        console.log(`📊 标注数据大小: ${(annotationSize / 1024).toFixed(2)} KB (${annotations.length}个标注)`);
-        
-        // 根据数据大小选择存储方式
-        // Keywords字段限制较小（通常<32KB），对于大量标注使用附件方式
-        const USE_ATTACHMENT_THRESHOLD = 30 * 1024; // 30KB阈值
-        
-        if (annotationSize > USE_ATTACHMENT_THRESHOLD) {
-          // 方案B: 使用PDF附件存储（支持大数据量）
-          console.log('📎 数据量较大，使用PDF附件方式存储...');
-          
-          try {
-            // 将JSON字符串转换为Uint8Array
-            const encoder = new TextEncoder();
-            const jsonBytes = encoder.encode(annotationJSON);
-            
-            const { PDFName, PDFString, PDFDict, PDFHexString, PDFDocument: PDFDocClass } = window.PDFLib;
-            
-            // 🚀 性能优化：只在必要时重建PDF（删除旧附件）
-            // 检查是否存在旧的 annotations.json 附件
-            let needRebuild = false;
-            
-            // 方法1：尝试通过catalog.get()方法检测（可能失败）
-            try {
-              const catalog = pdfDoc.catalog;
-              const namesDict = catalog.get(PDFName.of('Names'));
-              if (namesDict) {
-                const embeddedFilesDict = namesDict.get(PDFName.of('EmbeddedFiles'));
-                if (embeddedFilesDict) {
-                  const namesArray = embeddedFilesDict.get(PDFName.of('Names'));
-                  if (namesArray && namesArray.length > 0) {
-                    for (let i = 0; i < namesArray.length; i += 2) {
-                      const fileName = namesArray[i];
-                      const fileNameStr = fileName?.toString?.().replace(/[()]/g, '') || '';
-                      if (fileNameStr === 'annotations.json') {
-                        needRebuild = true;
-                        break;
-                      }
-                    }
-                  }
-                }
-              }
-            } catch (e) {
-              // 方法1失败，继续尝试方法2
-            }
-            
-            // 方法2：如果方法1失败，遍历所有对象查找附件（更可靠）
-            if (!needRebuild) {
-              try {
-                const attachmentRefs = pdfDoc.context.enumerateIndirectObjects();
-                
-                for (const [ref, obj] of attachmentRefs) {
-                  try {
-                    if (obj && obj.dict) {
-                      const typeObj = obj.dict.get(PDFName.of('Type'));
-                      if (typeObj?.toString() === '/Filespec') {
-                        const fName = obj.dict.get(PDFName.of('F')) || obj.dict.get(PDFName.of('UF'));
-                        const fileName = fName?.toString().replace(/[()]/g, '');
-                        
-                        if (fileName === 'annotations.json') {
-                          needRebuild = true;
-                          break;
-                        }
-                      }
-                    }
-                  } catch (objError) {
-                    continue;
-                  }
-                }
-              } catch (e) {
-                // 方法2也失败，跳过重建
-              }
-            }
-            
-            // 如果检测到旧附件，重建PDF以清除旧数据
-            if (needRebuild) {
-              console.log('🔄 检测到旧附件，重建PDF以清除旧数据...');
-              
-              const t0 = performance.now();
-              const newPdfDoc = await PDFDocClass.create();
-              
-              // 复制所有页面
-              const pageCount = pdfDoc.getPageCount();
-              const copiedPages = await newPdfDoc.copyPages(pdfDoc, Array.from({length: pageCount}, (_, i) => i));
-              copiedPages.forEach(page => newPdfDoc.addPage(page));
-              
-              // 复制元数据
-              try {
-                const title = pdfDoc.getTitle();
-                const author = pdfDoc.getAuthor();
-                const subject = pdfDoc.getSubject();
-                const creator = pdfDoc.getCreator();
-                const producer = pdfDoc.getProducer();
-                
-                if (title) newPdfDoc.setTitle(title);
-                if (author) newPdfDoc.setAuthor(author);
-                if (subject) newPdfDoc.setSubject(subject);
-                if (creator) newPdfDoc.setCreator(creator);
-                if (producer) newPdfDoc.setProducer(producer);
-              } catch (e) {
-                // 忽略元数据复制错误
-              }
-              
-              // 使用新的PDF文档
-              pdfDoc = newPdfDoc;
-              const t1 = performance.now();
-              console.log(`✅ PDF重建完成，耗时: ${(t1 - t0).toFixed(2)}ms`);
-            }
-            
-            // 创建嵌入文件流对象
-            const fileStream = pdfDoc.context.flateStream(jsonBytes);
-            const fileStreamRef = pdfDoc.context.register(fileStream);
-            
-            // 创建文件规范字典
-            const fileSpecDict = pdfDoc.context.obj({
-              Type: PDFName.of('Filespec'),
-              F: PDFString.of('annotations.json'),
-              UF: PDFString.of('annotations.json'),
-              Desc: PDFString.of('PDF标注查看器标注数据'),
-              EF: pdfDoc.context.obj({
-                F: fileStreamRef
-              })
-            });
-            
-            const fileSpecRef = pdfDoc.context.register(fileSpecDict);
-            
-            // 创建Names数组（只包含新附件）
-            const namesArray = [
-              PDFString.of('annotations.json'),
-              fileSpecRef
-            ];
-            
-            // 创建EmbeddedFiles字典
-            const embeddedFilesDict = pdfDoc.context.obj({
-              Names: namesArray
-            });
-            const embeddedFilesDictRef = pdfDoc.context.register(embeddedFilesDict);
-            
-            // 创建Names字典
-            const namesDict = pdfDoc.context.obj({
-              EmbeddedFiles: embeddedFilesDictRef
-            });
-            const namesDictRef = pdfDoc.context.register(namesDict);
-            
-            // 设置到Catalog
-            const catalog = pdfDoc.catalog;
-            catalog.set(PDFName.of('Names'), namesDictRef);
-            
-            // 在Keywords中添加标记，表明使用了附件存储
-            try {
-              const attachmentMarker = 'ANNOTATION_DATA:PDF标注查看器:1.0:ATTACHMENT';
-              let existingKeywords = null;
-              try {
-                existingKeywords = pdfDoc.getKeywords();
-              } catch (e) {
-                existingKeywords = null;
-              }
-              
-              let newKeywords = [];
-              if (existingKeywords && Array.isArray(existingKeywords)) {
-                newKeywords = existingKeywords.filter(keyword => 
-                  keyword && typeof keyword === 'string' && !keyword.includes('ANNOTATION_DATA:')
-                );
-              } else if (existingKeywords && typeof existingKeywords === 'string') {
-                const keywords = existingKeywords.split(' ').filter(keyword => 
-                  keyword && !keyword.includes('ANNOTATION_DATA:')
-                );
-                newKeywords = keywords;
-              }
-              
-              newKeywords.push(attachmentMarker);
-              pdfDoc.setKeywords(newKeywords);
-            } catch (keywordError) {
-              console.warn('⚠️ 设置附件标记失败，但附件已保存:', keywordError.message);
-            }
-            
-            console.log(`✅ 已将 ${annotations.length} 个标注作为附件保存到PDF (${(annotationSize / 1024).toFixed(2)} KB)`);
-            
-          } catch (attachError) {
-            console.error('❌ 附件保存失败，尝试使用Keywords方式:', attachError);
-            throw attachError; // 抛出以进入fallback逻辑
-          }
-          
-        } else {
-          // 方案A: 使用Keywords字段存储（适合小数据量）
-          console.log('📝 数据量适中，使用Keywords字段存储...');
-        
-        // 将标注数据保存到PDF的Keywords字段中
-        // 使用格式：ANNOTATION_DATA:工具名称:版本:JSON数据
-        const annotationKeyword = `ANNOTATION_DATA:PDF标注查看器:1.0:${annotationJSON}`;
-        
-        // 安全获取现有的keywords并保留非标注相关的内容
-        let existingKeywords = null;
-        try {
-          existingKeywords = pdfDoc.getKeywords();
-        } catch (keywordError) {
-          console.warn('⚠️ 获取PDF现有Keywords失败，跳过合并:', keywordError.message);
-          existingKeywords = null;
-        }
-        
-        let newKeywords = [];
-        
-        if (existingKeywords && Array.isArray(existingKeywords)) {
-          // 保留现有的非标注keywords，并过滤无效数据
-          newKeywords = existingKeywords.filter(keyword => 
-            keyword && typeof keyword === 'string' && !keyword.includes('ANNOTATION_DATA:')
-          );
-        } else if (existingKeywords && typeof existingKeywords === 'string') {
-          // 处理字符串格式的keywords
-          const keywords = existingKeywords.split(' ').filter(keyword => 
-            keyword && !keyword.includes('ANNOTATION_DATA:')
-          );
-          newKeywords = keywords;
-        }
-        
-        // 添加新的标注数据
-        newKeywords.push(annotationKeyword);
-        
-        // 安全设置或更新Keywords字段
-        try {
-          pdfDoc.setKeywords(newKeywords);
-            console.log(`✅ 已将 ${annotations.length} 个标注保存到PDF Keywords字段`);
-        } catch (setKeywordError) {
-          console.warn('⚠️ 设置PDF Keywords失败，尝试仅保存标注数据:', setKeywordError.message);
-          // 如果设置失败，尝试只设置我们的标注数据
-          try {
-            pdfDoc.setKeywords([annotationKeyword]);
-              console.log(`✅ 已将 ${annotations.length} 个标注保存到PDF Keywords字段（覆盖模式）`);
-          } catch (finalError) {
-              console.warn('⚠️ PDF Keywords保存失败，尝试使用附件方式...');
-              throw finalError; // 抛出错误以便尝试附件方式
-            }
-          }
-        }
-        
-      } catch (metadataError) {
-        console.error('❌ 保存标注数据失败:', metadataError);
-        
-        // 最后的fallback：尝试使用附件方式（如果之前未尝试）
-        try {
-          const annotationData = {
-            annotations: annotations,
-            timestamp: new Date().toISOString(),
-            version: '1.0'
-          };
-          const annotationJSON = JSON.stringify(annotationData);
-          const encoder = new TextEncoder();
-          const jsonBytes = encoder.encode(annotationJSON);
-          
-          // 使用低级API创建附件
-          const { PDFName, PDFString } = window.PDFLib;
-          const fileStream = pdfDoc.context.flateStream(jsonBytes);
-          const fileStreamRef = pdfDoc.context.register(fileStream);
-          
-          const fileSpecDict = pdfDoc.context.obj({
-            Type: PDFName.of('Filespec'),
-            F: PDFString.of('annotations.json'),
-            UF: PDFString.of('annotations.json'),
-            Desc: PDFString.of('PDF标注查看器标注数据（fallback）'),
-            EF: pdfDoc.context.obj({
-              F: fileStreamRef
-            })
-          });
-          
-          const fileSpecRef = pdfDoc.context.register(fileSpecDict);
-          const catalog = pdfDoc.catalog;
-          let namesDict = catalog.get(PDFName.of('Names'));
-          
-          if (!namesDict) {
-            namesDict = pdfDoc.context.obj({});
-            catalog.set(PDFName.of('Names'), namesDict);
-          }
-          
-          let embeddedFilesDict = namesDict.get(PDFName.of('EmbeddedFiles'));
-          if (!embeddedFilesDict) {
-            embeddedFilesDict = pdfDoc.context.obj({});
-            namesDict.set(PDFName.of('EmbeddedFiles'), embeddedFilesDict);
-          }
-          
-          let namesArray = embeddedFilesDict.get(PDFName.of('Names'));
-          if (!namesArray) {
-            namesArray = [];
-          }
-          
-          // 将数组转换为可操作的格式
-          const existingArray = Array.isArray(namesArray) ? [...namesArray] : [];
-          
-          // 删除旧的annotations.json附件（如果存在）
-          const filteredArray = [];
-          for (let i = 0; i < existingArray.length; i += 2) {
-            const fileName = existingArray[i];
-            const fileRef = existingArray[i + 1];
-            const fileNameStr = fileName?.toString?.().replace(/[()]/g, '') || '';
-            
-            if (fileNameStr !== 'annotations.json') {
-              filteredArray.push(fileName);
-              filteredArray.push(fileRef);
-            }
-          }
-          
-          // 添加新的附件
-          filteredArray.push(PDFString.of('annotations.json'));
-          filteredArray.push(fileSpecRef);
-          
-          // 创建完全新的Embedded Files字典
-          const newEmbeddedFilesDict = pdfDoc.context.obj({
-            Names: filteredArray
-          });
-          const newEmbeddedFilesDictRef = pdfDoc.context.register(newEmbeddedFilesDict);
-          
-          // 创建完全新的Names字典
-          const newNamesDict = pdfDoc.context.obj({
-            EmbeddedFiles: newEmbeddedFilesDictRef
-          });
-          const newNamesDictRef = pdfDoc.context.register(newNamesDict);
-          
-          // 替换Catalog中的整个Names字典
-          catalog.set(PDFName.of('Names'), newNamesDictRef);
-          
-          console.log('✅ 已创建并替换完整的Names字典');
-          
-          console.log('✅ 使用附件方式保存成功（fallback模式）');
-        } catch (fallbackError) {
-          console.error('❌ 所有保存方式均失败:', fallbackError);
-          message.error('标注数据保存失败，但PDF文件仍会生成');
-        }
-      }
-    } else {
-      console.log('ℹ️ 跳过元数据保存（导出PDF模式）');
+      const data = {annotations, timestamp: new Date().toISOString(), version: '1.0'};
+      replacePdfAnnotationAttachment(pdfDoc, new TextEncoder().encode(JSON.stringify(data)), window.PDFLib);
+      const keywords = String(pdfDoc.getKeywords() || '').replace(/ANNOTATION_DATA:[^\s]+/g, '').trim();
+      pdfDoc.setKeywords([keywords, 'ANNOTATION_DATA:PDF标注查看器:1.0:ATTACHMENT'].filter(Boolean));
     }
-      
+
     // 生成并返回PDF字节数据
     onProgress?.({ phase: 'serializing' });
     if (onProgress) await new Promise(resolve => setTimeout(resolve, 0));
     const { bytes: pdfBytes, blob: pdfBlob, diagnostics } = await savePdfWithTimeBudget(pdfDoc, {
       pdfLib: window.PDFLib,
-      output,
+      output: isElectron() ? output : 'blob',
       timeBudgetMs: includeImageAnnotations ? 16 : 12,
       chunkSizeBytes: includeImageAnnotations ? 8 * 1024 * 1024 : 4 * 1024 * 1024,
       onProgress: detail => onProgress?.({ phase: 'serializing', ...detail }),
     });
     const serializedPageCount = pdfDoc.getPageCount();
-    const generatedOutput = pdfBlob || pdfBytes;
+    const generatedOutput = appendPdfDraftIdentity(pdfBlob || pdfBytes,
+      currentPdfDraftInfoRef.current, getAnnotationDraftUserKey(), serializedPageCount);
     const serializationLog = { ...diagnostics, pages: serializedPageCount, kind: includeImageAnnotations ? 'annotated' : 'editable' };
     window.__lastPdfSerializationTiming = serializationLog;
     console.info('[PDF封装耗时]', serializationLog);
@@ -10017,148 +9457,25 @@ function AppContent() {
     await new Promise(resolve => setTimeout(resolve, 0));
     
     onProgress?.({ phase: 'generated' });
+    if (!isElectron()) {
+      const result = await optimizePdfExport(generatedOutput instanceof Blob ? generatedOutput : new Blob([generatedOutput], {type: 'application/pdf'}), {
+        onStatus: status => publishPdfExportProgress({status})
+      });
+      if (result.warning) message.warning({content: `${result.warning}，将导出未经优化的完整 PDF`, duration: 6});
+      else if (result.optimized) message.success(`PDF 无损优化完成，减少 ${(result.savedBytes / 1024 / 1024).toFixed(1)} MB`);
+      return result.blob;
+    }
     return generatedOutput;
   };
 
-  const decodePdfAttachmentStream = async (stream) => {
-    if (!stream) return null;
-    if (typeof stream.decode === 'function') {
-      try {
-        return stream.decode();
-      } catch (error) {
-        console.warn('PDF附件decode失败，尝试其他方式:', error.message);
-      }
-    }
 
-    const contents = stream.contents || (typeof stream.getContents === 'function' ? stream.getContents() : null);
-    if (!contents) return null;
-
-    try {
-      const { PDFName } = window.PDFLib;
-      const filter = stream.dict?.get(PDFName.of('Filter'));
-      if (filter?.toString?.().includes('FlateDecode') && window.pako) {
-        return window.pako.inflate(contents);
-      }
-    } catch (error) {
-      console.warn('PDF附件解压判断失败:', error.message);
-    }
-
-    return contents;
-  };
 
   const readEditablePdfAnnotations = async (pdfDoc) => {
-    const { PDFName } = window.PDFLib;
-    const getPdfArrayLength = array => (
-      Array.isArray(array) ? array.length : Number(array?.size?.() || 0)
-    );
-    const getPdfArrayItem = (array, index) => (
-      Array.isArray(array) ? array[index] : array?.get?.(index)
-    );
-
-    const readFileSpec = async (fileSpecObj) => {
-      if (!fileSpecObj) return null;
-      const dict = fileSpecObj.dict || fileSpecObj;
-      const getValue = name => {
-        try {
-          return typeof dict.get === 'function' ? dict.get(PDFName.of(name)) : null;
-        } catch {
-          return null;
-        }
-      };
-
-      const fName = getValue('F') || getValue('UF');
-      const fileName = fName?.toString?.().replace(/[()]/g, '');
-      if (fileName !== 'annotations.json') return null;
-
-      const efDictRef = getValue('EF');
-      const efDict = efDictRef ? pdfDoc.context.lookup(efDictRef) || efDictRef : null;
-      const embeddedFileRef = efDict?.get?.(PDFName.of('F'));
-      if (!embeddedFileRef) return null;
-
-      const embeddedFileStream = pdfDoc.context.lookup(embeddedFileRef);
-      const bytes = await decodePdfAttachmentStream(embeddedFileStream);
-      if (!bytes) return null;
-
-      const jsonString = new TextDecoder().decode(bytes);
-      return JSON.parse(jsonString);
-    };
-
-    try {
-      const catalog = pdfDoc.catalog;
-      const namesDictRef = catalog.get(PDFName.of('Names'));
-      const namesDict = namesDictRef ? pdfDoc.context.lookup(namesDictRef) || namesDictRef : null;
-      const embeddedFilesDictRef = namesDict?.get?.(PDFName.of('EmbeddedFiles'));
-      const embeddedFilesDict = embeddedFilesDictRef ? pdfDoc.context.lookup(embeddedFilesDictRef) || embeddedFilesDictRef : null;
-      const namesArray = embeddedFilesDict?.get?.(PDFName.of('Names'));
-
-      if (namesArray) {
-        const namesLength = getPdfArrayLength(namesArray);
-        for (let i = 0; i < namesLength; i += 2) {
-          const fileRef = getPdfArrayItem(namesArray, i + 1);
-          const fileSpecObj = fileRef ? pdfDoc.context.lookup(fileRef) : null;
-          const data = await readFileSpec(fileSpecObj);
-          if (data?.annotations) return data;
-        }
-      }
-    } catch (error) {
-      console.warn('通过Names读取可编辑标注失败:', error.message);
-    }
-
-    try {
-      const objects = pdfDoc.context.enumerateIndirectObjects();
-      for (const [, obj] of objects) {
-        const typeObj = obj?.dict?.get?.(PDFName.of('Type'));
-        if (typeObj?.toString?.() !== '/Filespec') continue;
-        const data = await readFileSpec(obj);
-        if (data?.annotations) return data;
-      }
-    } catch (error) {
-      console.warn('遍历PDF对象读取可编辑标注失败:', error.message);
-    }
-
-    try {
-      const keywords = pdfDoc.getKeywords();
-      const keywordString = Array.isArray(keywords) ? keywords.join(' ') : (keywords || '');
-      const match = keywordString.match(/ANNOTATION_DATA:([^:]+):([^:]+):(.+)/);
-      if (match && match[1] === 'PDF标注查看器' && match[3] !== 'ATTACHMENT') {
-        return JSON.parse(match[3]);
-      }
-    } catch (error) {
-      console.warn('从Keywords读取可编辑标注失败:', error.message);
-    }
-
-    return { annotations: [], version: '1.0' };
+    return await readPdfEditableAnnotations(pdfDoc, window.PDFLib, window.pako?.inflate) || {annotations: [], version: '1.0'};
   };
 
   const writeEditablePdfAnnotations = async (pdfDoc, annotationData) => {
-    const { PDFName, PDFString } = window.PDFLib;
-    const annotationJSON = JSON.stringify(annotationData);
-    const jsonBytes = new TextEncoder().encode(annotationJSON);
-
-    const fileStream = pdfDoc.context.flateStream(jsonBytes);
-    const fileStreamRef = pdfDoc.context.register(fileStream);
-    const fileSpecDict = pdfDoc.context.obj({
-      Type: PDFName.of('Filespec'),
-      F: PDFString.of('annotations.json'),
-      UF: PDFString.of('annotations.json'),
-      Desc: PDFString.of('PDF标注查看器标注数据'),
-      EF: pdfDoc.context.obj({
-        F: fileStreamRef
-      })
-    });
-    const fileSpecRef = pdfDoc.context.register(fileSpecDict);
-    const embeddedFilesDict = pdfDoc.context.obj({
-      Names: [
-        PDFString.of('annotations.json'),
-        fileSpecRef
-      ]
-    });
-    const embeddedFilesDictRef = pdfDoc.context.register(embeddedFilesDict);
-    const namesDict = pdfDoc.context.obj({
-      EmbeddedFiles: embeddedFilesDictRef
-    });
-    const namesDictRef = pdfDoc.context.register(namesDict);
-    pdfDoc.catalog.set(PDFName.of('Names'), namesDictRef);
+    replacePdfAnnotationAttachment(pdfDoc, new TextEncoder().encode(JSON.stringify(annotationData)), window.PDFLib);
 
     try {
       pdfDoc.setKeywords(['ANNOTATION_DATA:PDF标注查看器:1.0:ATTACHMENT']);
@@ -10738,6 +10055,7 @@ function AppContent() {
 
     window.__luotuAnnotationStressApi = {
       addAnnotation: annotation => handleAnnotationAdd(annotation),
+      batchAddAnnotations: items => handleBatchAddAnnotations(items),
       goToPage: page => handlePageChange(Math.max(1, Math.min(Number(totalPages) || 1, Number(page) || 1))),
       flushDraft: options => flushAnnotationDraft(options),
       exportBoth: () => handleExportPDF('both'),
@@ -10983,14 +10301,10 @@ function AppContent() {
           weldAdjustmentMode={weldAdjustmentToolbarState.mode}
           onWeldAdjustmentAction={(key) => weldAdjustmentToolbarState.handleAction?.({ key })}
         />
-        {!isElectron() && hasPdfOpen && cloudAnnotationDraftStatus !== 'idle' && (
-          <CloudDraftStatusBadge $status={cloudAnnotationDraftStatus}>
-            {cloudAnnotationDraftStatus === 'saving'
-              ? '云端草稿保存中'
-              : cloudAnnotationDraftStatus === 'error'
-                ? '云端草稿保存失败'
-                : '云端草稿已保存'}
-          </CloudDraftStatusBadge>
+        {!isElectron() && (
+          <DraftSaveStatus store={draftSaveHealthRef.current} hasDocument={hasPdfOpen} onRetry={handleRetryDraftSave}
+            onExport={() => handleExportPDF('editable')} onRecover={handleOpenDraftRecovery}
+            pageCacheContainerRef={pageCacheStatusContainerRef} />
         )}
         <ContentContainer>
           
@@ -11072,6 +10386,7 @@ function AppContent() {
                 onAreaDelete={handleAreaDelete}
                 onPdfPointerPositionChange={handlePdfPointerPositionChange}
                 debugButtonsContainerRef={debugButtonsContainerRef}
+                pageCacheStatusContainerRef={!isElectron() ? pageCacheStatusContainerRef : undefined}
                 onWeldAdjustmentStateChange={setWeldAdjustmentToolbarState}
               />
             )}
@@ -11123,6 +10438,8 @@ function AppContent() {
             />
           </RulesPanelErrorBoundary>
         </ContentContainer>
+        {recoveryDialog.open && <DraftRecoveryModal {...recoveryDialog} onRestore={handleRestoreAnnotationDraft}
+          onClose={handleCloseDraftRecovery} onChoosePdf={handleOpenPDFClick} />}
         
         {/* OCR进度弹窗 */}
         <OCRProgressModal

@@ -147,14 +147,15 @@ export const MultiPageBatchModal = ({
   }, [pdfDocument, pdfPath, startPage, endPage, startNumber, prefix, getStepIndex]);
 
   // 生成标注
-  const handleGenerateAnnotations = useCallback(() => {
+  const handleGenerateAnnotations = useCallback(async () => {
+    try {
     if (!result || !result.allWelds || result.allWelds.length === 0) {
       message.warning('没有焊点数据可生成标注');
       return;
     }
     
     // 转换为标注格式，传入排序策略
-    const annotations = multiPageBatchService.convertWeldsToAnnotations(scale, annotationRule, sortStrategy);
+    const annotations = await multiPageBatchService.convertWeldsToAnnotationsFromCache(scale, annotationRule, sortStrategy);
     
     if (annotations.length > 0) {
       // 调用回调，传递标注数据
@@ -171,6 +172,8 @@ export const MultiPageBatchModal = ({
       message.success(`已生成 ${annotations.length} 个焊点标注 (排序: ${strategyName})`);
       handleClose();
     }
+
+    } catch (error) { console.error(error); message.error(error.message || "生成标注失败"); }
   }, [result, scale, annotationRule, sortStrategy, onComplete, handleClose]);
 
   // 获取步骤状态图标

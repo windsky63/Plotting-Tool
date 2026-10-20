@@ -1,3 +1,5 @@
+import {AnnotationIdIndex, createAnnotationIdIndex} from './annotationIdIndex';
+
 const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
 
 export const normalizeAnnotationPageNumber = value => {
@@ -20,7 +22,8 @@ const nextPageRevision = (previousIndex, page) => (
 
 const buildIndex = (annotations, previousIndex) => {
   const grouped = new Map();
-  const byId = new Map();
+  const idUpdates = new Map();
+  const currentIds = new Set();
 
   annotations.forEach(annotation => {
     const page = normalizeAnnotationPageNumber(annotation?.page);
@@ -31,7 +34,11 @@ const buildIndex = (annotations, previousIndex) => {
       grouped.set(page, [annotation]);
     }
     if (annotation?.id !== undefined && annotation?.id !== null) {
-      byId.set(annotation.id, annotation);
+      if (previousIndex?.byId) {
+        currentIds.add(annotation.id);
+        if (previousIndex.byId.get(annotation.id) !== annotation) idUpdates.set(annotation.id, annotation);
+        else idUpdates.delete(annotation.id); // A later duplicate ID still wins.
+      }
     }
   });
 
@@ -55,12 +62,18 @@ const buildIndex = (annotations, previousIndex) => {
     pageRevision.set(page, nextPageRevision(previousIndex, page));
   });
 
+  const removedIds = previousIndex?.annotations
+    ? previousIndex.annotations.filter(annotation => annotation?.id != null && !currentIds.has(annotation.id)).map(annotation => annotation.id)
+    : [];
+  const byId = previousIndex?.byId instanceof AnnotationIdIndex
+    ? previousIndex.byId.withChanges(annotations, idUpdates, removedIds)
+    : createAnnotationIdIndex(annotations);
   return { annotations, byPage, byId, pageRevision };
 };
 
 const appendToIndex = (annotations, previousIndex) => {
   const byPage = new Map(previousIndex.byPage);
-  const byId = new Map(previousIndex.byId);
+  const idUpdates = new Map();
   const pageRevision = new Map(previousIndex.pageRevision);
   const touchedPages = new Set();
 
@@ -74,10 +87,13 @@ const appendToIndex = (annotations, previousIndex) => {
     }
     byPage.get(page).push(annotation);
     if (annotation?.id !== undefined && annotation?.id !== null) {
-      byId.set(annotation.id, annotation);
+      idUpdates.set(annotation.id, annotation);
     }
   }
 
+  const byId = previousIndex.byId instanceof AnnotationIdIndex
+    ? previousIndex.byId.withChanges(annotations, idUpdates)
+    : createAnnotationIdIndex(annotations);
   return { annotations, byPage, byId, pageRevision };
 };
 

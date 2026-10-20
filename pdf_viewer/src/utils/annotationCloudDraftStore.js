@@ -40,10 +40,14 @@ const requestJson = async (url, options = {}) => {
     });
 
     const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
+    let data;
+    try { data = text ? JSON.parse(text) : null; }
+    catch { throw new Error('云端草稿接口返回无效 JSON，请重试'); }
 
-    if (!response.ok || data.success === false) {
-      const error = new Error(data.detail || data.error || `HTTP ${response.status}`);
+    const legacyRead = !options.method && data && Object.prototype.hasOwnProperty.call(data, 'draft');
+    if (!response.ok || !data || data.success === false || data.ok === false ||
+        (!legacyRead && data.success !== true && data.ok !== true)) {
+      const error = new Error(data?.detail || data?.error || `HTTP ${response.status}，草稿请求未确认`);
       error.status = response.status;
       error.data = data;
       throw error;
@@ -56,7 +60,7 @@ const requestJson = async (url, options = {}) => {
 };
 
 export const saveCloudAnnotationDraft = async (draft) => {
-  const userKey = getAnnotationDraftUserKey();
+  const userKey = sanitizeUserKey(draft.fileInfo?.recoveryUserKey) || getAnnotationDraftUserKey();
   const payload = {
     ...draft,
     userKey
@@ -69,12 +73,12 @@ export const saveCloudAnnotationDraft = async (draft) => {
   });
 };
 
-export const loadCloudAnnotationDraft = async (fingerprint) => {
+export const loadCloudAnnotationDraft = async (fingerprint, recoveryUserKey = '') => {
   if (!fingerprint) {
     return null;
   }
 
-  const userKey = getAnnotationDraftUserKey();
+  const userKey = sanitizeUserKey(recoveryUserKey) || getAnnotationDraftUserKey();
   const params = new URLSearchParams({ userKey, fingerprint });
   const data = await requestJson(`${CLOUD_DRAFT_API_BASE}/latest?${params.toString()}`);
   return data.draft || null;

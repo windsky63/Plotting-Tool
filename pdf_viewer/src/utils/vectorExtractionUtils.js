@@ -3,6 +3,8 @@
  * 提取PDF中的线段、矩形等几何元素（参考 pdf_equipment_app）
  */
 
+import { estimateVectorBytes } from './pageVectorStore';
+
 export class VectorExtractionUtils {
   static pdfjsApi = null;
 
@@ -17,7 +19,8 @@ export class VectorExtractionUtils {
 
   // 矢量数组可能远大于页面位图索引。使用小型 LRU，避免全页处理时
   // 当前文档的矢量缓存按页数无限增长；被淘汰页面可按需重新提取。
-  static vectorCacheMaxEntries = 24;
+  static vectorCacheMaxEntries = 5;
+  static vectorCacheMaxBytes = 32 * 1024 * 1024;
 
   static inFlightRequests = new Map();
 
@@ -88,9 +91,11 @@ export class VectorExtractionUtils {
     if (!cacheKey) return;
     if (this.vectorCache.has(cacheKey)) this.vectorCache.delete(cacheKey);
     this.vectorCache.set(cacheKey, vectors);
-    while (this.vectorCache.size > this.vectorCacheMaxEntries) {
+    let bytes = Array.from(this.vectorCache.values()).reduce((total, value) => total + estimateVectorBytes(value), 0);
+    while (this.vectorCache.size > 1 && (this.vectorCache.size > this.vectorCacheMaxEntries || bytes > this.vectorCacheMaxBytes)) {
       const oldestKey = this.vectorCache.keys().next().value;
       if (oldestKey === undefined) break;
+      bytes -= estimateVectorBytes(this.vectorCache.get(oldestKey));
       this.vectorCache.delete(oldestKey);
     }
   }

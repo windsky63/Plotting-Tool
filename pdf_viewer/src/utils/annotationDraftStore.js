@@ -1,3 +1,5 @@
+import { getDraftDocumentId, matchRecoveryFile, readPdfDraftIdentity, validateRecoveryDraft } from './draftRecovery';
+
 const DB_NAME = 'pdf_viewer_annotation_drafts';
 const DB_VERSION = 1;
 const STORE_NAME = 'drafts';
@@ -83,6 +85,7 @@ const openDraftDb = () => {
     request.onblocked = () => reject(new Error('Annotation draft database is blocked'));
   });
 
+  dbPromise = dbPromise.catch(error => {dbPromise = null; throw error;});
   return dbPromise;
 };
 
@@ -181,7 +184,8 @@ const writeShardedDraft = async draft => {
 const reconstructShardedDraft = (meta, records) => {
   if (!meta || meta.storageMode !== SHARDED_STORAGE_MODE) return meta;
   const annotations = (records || [])
-    .filter(record => record?.type === 'annotation-page' && Array.isArray(record.annotations))
+    .filter(record => record?.type === 'annotation-page' && Array.isArray(record.annotations) &&
+      (Array.isArray(meta.annotationPages) ? meta.annotationPages : []).includes(Number(record.page)))
     .sort((left, right) => Number(left.page) - Number(right.page))
     .flatMap(record => record.annotations);
   return { ...meta, annotations };
@@ -239,11 +243,14 @@ export const buildPdfDraftFileInfo = async (file, arrayBuffer = null) => {
     fingerprint = await digestBytes(sample);
   }
 
+  const identity = await readPdfDraftIdentity(file);
   return {
     name,
     size,
     lastModified,
-    fingerprint
+    fingerprint,
+    documentId: identity?.documentId || `pdf_${fingerprint}`,
+    ...(identity || {}),
   };
 };
 
@@ -251,6 +258,8 @@ export const isSamePdfDraftFile = (draftFileInfo, selectedFileInfo) => {
   if (!draftFileInfo || !selectedFileInfo) {
     return false;
   }
+  if (draftFileInfo.projectId && selectedFileInfo.projectId && draftFileInfo.projectId !== selectedFileInfo.projectId) return false;
+  if (matchRecoveryFile(draftFileInfo, selectedFileInfo)) return true;
 
   const sameName = draftFileInfo.name === selectedFileInfo.name;
   const sameSize = draftFileInfo.size == null || selectedFileInfo.size == null
@@ -270,6 +279,30 @@ export const isSamePdfDraftFile = (draftFileInfo, selectedFileInfo) => {
 };
 
 export const saveLatestAnnotationDraft = async (draft) => {
+  const previous = await loadLocalAnnotationDraft();
+  if (previous?.dirty && previous.recoveryValidation?.valid && previous.annotations?.length &&
+      (draft.checkpoint || previous.fileInfo?.fingerprint !== draft.fileInfo?.fingerprint)) {
+    const id = `archive:${previous.fileInfo?.fingerprint || 'legacy'}:${Date.now()}`;
+    const archive = {...previous, id, type: 'annotation-snapshot', storageMode: undefined};
+    const {annotations, ...summary} = archive;
+    try { await runStoreRequest('readwrite', store => {
+      const request = store.getAllKeys();
+      request.onsuccess = () => {
+        store.put(archive);
+        store.put({...summary, id: `archive-summary:${id}`, type: 'archive-summary', localId: id});
+        const prefix = `archive:${previous.fileInfo?.fingerprint || 'legacy'}:`;
+        (request.result || []).filter(key => String(key).startsWith(prefix)).sort().reverse().slice(2)
+          .forEach(key => {store.delete(key); store.delete(`archive-summary:${key}`);});
+        (request.result || []).filter(key => String(key).startsWith('archive:'))
+          .sort((a, b) => Number(String(b).split(':').pop()) - Number(String(a).split(':').pop())).slice(29)
+          .forEach(key => {store.delete(key); store.delete(`archive-summary:${key}`);});
+      };
+      return request;
+    }); } catch (error) {
+      if (error?.name !== 'QuotaExceededError') throw error;
+      console.warn('历史检查点空间不足，继续保存当前草稿');
+    }
+  }
   const normalizedDraft = await writeShardedDraft(draft);
   return {
     id: normalizedDraft.id,
@@ -281,13 +314,60 @@ export const saveLatestAnnotationDraft = async (draft) => {
   };
 };
 
+export const loadLocalAnnotationDraft = async (id = LATEST_DRAFT_KEY) => {
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly'), store = tx.objectStore(STORE_NAME);
+    const request = store.get(id); let meta, records = [];
+    request.onsuccess = () => {
+      meta = request.result;
+      if (meta?.storageMode === SHARDED_STORAGE_MODE) (Array.isArray(meta.annotationPages) ? meta.annotationPages : []).forEach(page => {
+        const shard = store.get(`${PAGE_KEY_PREFIX}${page}`);
+        shard.onsuccess = () => records.push(shard.result);
+      });
+    };
+    tx.oncomplete = () => {
+      const draft = reconstructShardedDraft(meta, records);
+      resolve(draft ? {...draft, recoveryValidation: validateRecoveryDraft(draft)} : null);
+    };
+    tx.onerror = () => reject(tx.error || request.error);
+    tx.onabort = () => reject(tx.error || new Error('草稿读取中断，请重试'));
+  });
+};
+
+export const listLocalAnnotationDrafts = async () => {
+  const emergency = loadEmergencyDraft();
+  const summaries = [];
+  try {
+  const db = await openDraftDb();
+  const keys = await runStoreRequest('readonly', store => store.getAllKeys());
+  await Promise.all((keys || []).filter(key => key === LATEST_DRAFT_KEY || String(key).startsWith('archive-summary:')).map(async key => {
+    const value = await new Promise((resolve, reject) => {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(key);
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    if (value && (key === LATEST_DRAFT_KEY || value.type === 'archive-summary')) summaries.push({
+      ...value, annotations: undefined, localId: value.localId || key,
+      annotationCount: value.annotationCount ?? value.annotations?.length ?? 0,
+      source: value.dirty === false ? '本机草稿（已保存副本）' : '本机草稿', documentId: getDraftDocumentId(value.fileInfo),
+    });
+  }));
+  } catch (error) {
+    if (!emergency) throw error;
+    summaries.readError = error.message;
+  }
+  if (emergency) summaries.push({...emergency, annotations: undefined, localId: 'emergency',
+    annotationCount: emergency.annotations.length, source: '本机应急副本'});
+  return summaries;
+};
+
+export const loadRecoveryLocalDraft = id => id === 'emergency' ? Promise.resolve(loadEmergencyDraft()) : loadLocalAnnotationDraft(id);
+
 export const loadLatestAnnotationDraft = async () => {
   const emergencyDraft = loadEmergencyDraft();
   try {
-    const records = await runStoreRequest('readonly', store => store.getAll());
-    const meta = (records || []).find(record => record?.id === LATEST_DRAFT_KEY);
-    const draft = reconstructShardedDraft(meta, records);
-    const indexedDraft = draft?.dirty && Array.isArray(draft.annotations) && draft.annotations.length > 0
+    const draft = await loadLocalAnnotationDraft();
+    const indexedDraft = draft?.dirty && draft.recoveryValidation?.valid && Array.isArray(draft.annotations) && draft.annotations.length > 0
       ? draft
       : null;
     if (!indexedDraft) return emergencyDraft;

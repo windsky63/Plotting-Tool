@@ -1,3 +1,5 @@
+const {createPdfExportOptimizer} = require('./pdf_export_optimizer');
+const pdfExportOptimizer = createPdfExportOptimizer();
 ﻿const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -2478,6 +2480,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+
+  if (pdfExportOptimizer.handle(req, res)) return;
 
   if (pdfPageCacheService?.handle(req, res)) {
     return;

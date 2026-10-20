@@ -1,5 +1,26 @@
 import multiPageBatchService from '../multiPageBatchService';
 import ocrService from '../ocrService';
+import { PageVectorStore } from '../../utils/pageVectorStore';
+
+test('archived vectors are read completely one page at a time for batch annotation layout', async () => {
+  const originalStore = multiPageBatchService.vectorPages;
+  const disk = new Map();
+  const store = new PageVectorStore({storage: {write: async (key, vectors) => disk.set(key, vectors), read: async key => disk.get(key)}});
+  store.activate('test-layout'); multiPageBatchService.vectorPages = store;
+  const convert = jest.spyOn(multiPageBatchService, 'convertWeldsToAnnotations').mockImplementation((scale, rule, strategy, arrows, context) => {
+    const page = context.welds[0].pageNum;
+    expect(context.pageVectors[page]).toEqual([{id: `line-${page}`, start: {x: 1, y: 2}, end: {x: 300, y: 400}}]);
+    expect(store.getStats().residentPages).toBeLessThanOrEqual(5);
+    return [{page}];
+  });
+  try {
+    for(let page = 1; page <= 60; page++) await store.set(page, [{id: `line-${page}`, start: {x: 1, y: 2}, end: {x: 300, y: 400}}]);
+    multiPageBatchService.allWelds = Array.from({length: 60}, (_, i) => ({pageNum: i + 1}));
+    const result = await multiPageBatchService.convertWeldsToAnnotationsFromCache(1, {}, 'KEEP_ORDER', null, {pageVectors: store.getSummary()});
+    expect(convert).toHaveBeenCalledTimes(60);
+    expect(result).toEqual(Array.from({length: 60}, (_, i) => ({page: i + 1})));
+  } finally { convert.mockRestore(); multiPageBatchService.vectorPages = originalStore; multiPageBatchService.reset(); }
+});
 
 describe('multiPageBatchService text recognition reuse', () => {
   beforeEach(() => {

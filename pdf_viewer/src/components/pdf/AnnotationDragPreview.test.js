@@ -3,6 +3,33 @@ import { createRoot } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import AnnotationDragPreview from './AnnotationDragPreview';
 
+test('120 anchored frame moves reuse one render and cancel restores visibility', () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  const container = document.createElement('div'); document.body.appendChild(container);
+  const root = createRoot(container), ref = createRef();
+  const renderer = jest.fn((page, annotations) => annotations.map(a =>
+    <svg key={a.id} data-preview-id={a.id} viewBox="0 0 120 120">
+      <line x1={a.startX} y1={a.startY} x2={a.endX - 10} y2={a.endY - 10}/>
+      <circle cx={a.startX} cy={a.startY} r="2"/><circle cx={a.endX} cy={a.endY} r="10"/>
+      <text x={a.endX} y={a.endY}>{a.text}</text>
+    </svg>));
+  const connection = () => next => ({connectionX: next.endX - 10, connectionY: next.endY - 10});
+  const original = {id: 'a', page: 1, hasLeaderLine: true, text: 'F1', startX: 10, startY: 10, endX: 100, endY: 100};
+  try {
+    act(() => root.render(<div><svg data-pdf-annotation-id="a"/>
+      <AnnotationDragPreview ref={ref} pageNumber={1} renderAnnotations={renderer} createLeaderConnection={connection}/></div>));
+    act(() => ref.current.update([original]));
+    for (let i = 1; i <= 120; i++) act(() => ref.current.update([{...original, endX: 100 + i, endY: 100 + i}]));
+    expect(renderer).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('line').getAttribute('x1')).toBe('10');
+    expect(container.querySelector('line').getAttribute('x2')).toBe('210');
+    act(() => ref.current.update([{...original, endX: 220, color: 'blue'}]));
+    expect(renderer).toHaveBeenCalledTimes(2);
+    act(() => ref.current.clear());
+    expect(container.querySelector('[data-pdf-annotation-id="a"]').style.visibility).toBe('');
+  } finally { act(() => root.unmount()); container.remove(); }
+});
+
 test('preview renders selected items without rerendering parent and restores original visibility', () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   const container = document.createElement('div'); document.body.appendChild(container);

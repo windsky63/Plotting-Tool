@@ -1,5 +1,19 @@
 import { useState, useCallback, useRef } from 'react';
 
+// Callbacks held by annotation commands must only reach the CURRENT stack.
+// Capturing a rendered stack lets command -> old callback -> old stack chains
+// keep evicted commands (and their annotation indexes) alive indefinitely.
+const useHistoryStack = () => {
+  const [stack, publishStack] = useState([]);
+  const stackRef = useRef(stack);
+  const setStack = useCallback(update => {
+    const next = typeof update === 'function' ? update(stackRef.current) : update;
+    stackRef.current = next;
+    publishStack(next);
+  }, []);
+  return [stack, stackRef, setStack];
+};
+
 /**
  * 撤销重做Hook - 基于命令模式的简单实现
  * 
@@ -14,8 +28,8 @@ export const useUndoRedo = (options = {}) => {
   };
   
   // 撤销栈和重做栈
-  const [undoStack, setUndoStack] = useState([]);
-  const [redoStack, setRedoStack] = useState([]);
+  const [undoStack, undoStackRef, setUndoStack] = useHistoryStack();
+  const [redoStack, redoStackRef, setRedoStack] = useHistoryStack();
   
   // 批量操作标记
   const batchRef = useRef(null);
@@ -63,12 +77,13 @@ export const useUndoRedo = (options = {}) => {
     } catch (error) {
       console.error('❌ 命令执行失败:', error);
     }
-  }, [maxHistorySize]);
+  }, [maxHistorySize, setUndoStack, setRedoStack]);
   
   /**
    * 撤销上一个操作
    */
   const undo = useCallback(() => {
+    const undoStack = undoStackRef.current;
     if (undoStack.length === 0) {
       debugLog('🔄 撤销操作: 撤销栈为空，无法撤销');
       return;
@@ -89,12 +104,13 @@ export const useUndoRedo = (options = {}) => {
     } catch (error) {
       console.error('❌ 撤销失败:', error);
     }
-  }, [undoStack]);
+  }, [setUndoStack, setRedoStack]);
   
   /**
    * 重做下一个操作
    */
   const redo = useCallback(() => {
+    const redoStack = redoStackRef.current;
     if (redoStack.length === 0) {
       debugLog('🔄 重做操作: 重做栈为空，无法重做');
       return;
@@ -122,7 +138,7 @@ export const useUndoRedo = (options = {}) => {
     } catch (error) {
       console.error('❌ 重做失败:', error);
     }
-  }, [redoStack, maxHistorySize]);
+  }, [maxHistorySize, setUndoStack, setRedoStack]);
   
   /**
    * 开始批量操作
@@ -185,7 +201,7 @@ export const useUndoRedo = (options = {}) => {
     } else {
       debugLog('📝 批量操作为空，跳过添加到撤销栈');
     }
-  }, [maxHistorySize]);
+  }, [maxHistorySize, setUndoStack, setRedoStack]);
   
   /**
    * 清空所有历史记录
@@ -194,7 +210,7 @@ export const useUndoRedo = (options = {}) => {
     setUndoStack([]);
     setRedoStack([]);
     batchRef.current = null;
-  }, []);
+  }, [setUndoStack, setRedoStack]);
 
   // Once a local draft checkpoint exists, old command closures no longer need
   // to retain many generations of large annotation arrays in browser memory.
@@ -202,12 +218,14 @@ export const useUndoRedo = (options = {}) => {
     const limit = Math.max(0, Number(keepLatest) || 0);
     setUndoStack(prev => limit ? prev.slice(-limit) : []);
     setRedoStack([]);
-  }, []);
+  }, [setUndoStack, setRedoStack]);
   
   /**
    * 获取历史记录信息
    */
   const getHistoryInfo = useCallback(() => {
+    const undoStack = undoStackRef.current;
+    const redoStack = redoStackRef.current;
     return {
       undoCount: undoStack.length,
       redoCount: redoStack.length,
@@ -217,7 +235,7 @@ export const useUndoRedo = (options = {}) => {
       lastRedoDescription: redoStack.length > 0 ? redoStack[redoStack.length - 1].description : null,
       isBatching: batchRef.current !== null
     };
-  }, [undoStack.length, redoStack.length]);
+  }, []);
   
   return {
     // 主要操作方法

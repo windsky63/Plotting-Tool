@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Document, Page, pdfjs } from 'react-pdf';
+import PageCacheStatus from './PageCacheStatus';
+import { pdfjs } from 'react-pdf';
+import {OnDemandPdfDocument as Document, OnDemandPdfPage as Page} from './pdf/OnDemandPdfDocument';
+import {useWeldAdjustmentToolbarState} from './pdf/useWeldAdjustmentToolbarState';
 import { Spin, Alert, Empty, message, Modal, Input, Button, Table, Drawer, Select, Space, InputNumber, Progress } from 'antd';
 import {
   ViewerContainer,
@@ -38,6 +41,7 @@ import { OCRUtils } from '../utils/ocrUtils';
 import auditLogService from '../services/auditLogService';
 import { enrichTextDetectionResult, sanitizeRecognizedPipelineNumber } from '../utils/pipelineDetectionUtils';
 import { VectorExtractionUtils } from '../utils/vectorExtractionUtils';
+import {getDecodedPageBytes, trimDecodedPageCache} from '../utils/decodedPageCache';
 import { VectorVisualizer } from './debug/VectorVisualizer';
 import { VectorDebugToggle } from './debug/VectorDebugToggle';
 import { WeldDebugToggle } from './debug/WeldDebugToggle';
@@ -115,6 +119,8 @@ import {
   getBackgroundCacheDeferral
 } from '../utils/backgroundPdfCacheScheduling';
 import { touchBoundedMapEntry, touchExistingMapEntry } from '../utils/boundedLruCache';
+import { REMOTE_PAGE_FALLBACK_MS, startRemotePageLoading } from '../utils/remotePageLoading';
+import { retainNearbyPageVectors } from '../utils/nearbyPageVectors';
 import { configurePdfJsRuntime, PDFJS_WORKER_FILE } from '../utils/pdfjsRuntime';
 import {
   getCanvasDevicePixelRatio,
@@ -255,6 +261,7 @@ const PDFViewer = ({
   onAreaDelete, // 新增：区域删除回调
   onPdfPointerPositionChange,
   debugButtonsContainerRef, // 新增：调试按钮容器的ref，用于Portal渲染
+  pageCacheStatusContainerRef,
   onWeldAdjustmentStateChange
 }) => {
   // Server-side page snapshots are used by both the 3004 mirror and the
@@ -338,6 +345,10 @@ const PDFViewer = ({
   const [remotePageCacheRetryNonce, setRemotePageCacheRetryNonce] = useState(0);
   const remotePageCacheAbortRef = useRef(null);
   const currentRemotePageFetchRef = useRef({ page: 0, key: '', controller: null });
+  const remotePageLoadingLiveRef = useRef(null);
+  const remotePageLoadingDeadlineRef = useRef({ key: '', startedAt: 0 });
+  const [remotePageLoadingResumeNonce, setRemotePageLoadingResumeNonce] = useState(0);
+  const pdfGestureActiveRef = useRef(false);
   const remotePageWarmRef = useRef(new Set());
   const fullPagePrefetchBlockedRef = useRef({ scope: '', blocked: false });
   const singlePageSnapshotDecodeHandlesRef = useRef(new Map());
@@ -482,6 +493,7 @@ const PDFViewer = ({
     if (activeFetch?.key) singlePageSnapshotPendingRef.current.delete(activeFetch.key);
     currentRemotePageFetchRef.current = { page: 0, key: '', controller: null };
     singlePageSnapshotDecodeHandlesRef.current.forEach((handle, key) => {
+      clearTimeout(handle.upgradeTimer);
       handle.image.onload = null;
       handle.image.onerror = null;
       try { handle.image.src = ''; } catch (error) { /* already released */ }
@@ -513,6 +525,7 @@ const PDFViewer = ({
     singlePageSnapshotGenerationRef.current += 1;
     singlePageSnapshotDecodeHandlesRef.current.forEach((handle, key) => {
       if (key === keepKey) return;
+      clearTimeout(handle.upgradeTimer);
       handle.image.onload = null;
       handle.image.onerror = null;
       try { handle.image.src = ''; } catch (error) { /* already released */ }
@@ -550,6 +563,7 @@ const PDFViewer = ({
     const preloadImage = new Image();
     const previousDecode = singlePageSnapshotDecodeHandlesRef.current.get(key);
     if (previousDecode) {
+      clearTimeout(previousDecode.upgradeTimer);
       previousDecode.image.onload = null;
       previousDecode.image.onerror = null;
       try { previousDecode.image.src = ''; } catch (error) { /* already released */ }
@@ -558,6 +572,7 @@ const PDFViewer = ({
     const decodeHandle = { image: preloadImage, url };
     singlePageSnapshotDecodeHandlesRef.current.set(key, decodeHandle);
     const releasePreloadImage = (revokeUrl = false) => {
+      clearTimeout(decodeHandle.upgradeTimer);
       preloadImage.onload = null;
       preloadImage.onerror = null;
       try { preloadImage.src = ''; } catch (error) { /* already released */ }
@@ -567,6 +582,11 @@ const PDFViewer = ({
       if (revokeUrl) URL.revokeObjectURL(url);
     };
     preloadImage.onload = () => {
+      if (pdfGestureActiveRef.current && Number(singlePageCurrentRef.current) === Number(pageNumber) &&
+          singlePagePreviewCacheRef.current.has(getDirectionalPreviewCacheKey(singlePageSnapshotScope, pageNumber))) {
+        decodeHandle.upgradeTimer = setTimeout(() => preloadImage.onload?.(), 100);
+        return;
+      }
       if (singlePageSnapshotGenerationRef.current !== generation) {
         singlePageSnapshotPendingRef.current.delete(key);
         releasePreloadImage(true);
@@ -581,27 +601,20 @@ const PDFViewer = ({
         size: blob.size,
         cssWidth,
         cssHeight,
+        decodedBytes: (preloadImage.naturalWidth || cssWidth || 0) * (preloadImage.naturalHeight || cssHeight || 0) * 4,
         snapshotScale: Number(snapshotScale) || 1,
         lastUsed: Date.now()
       });
-      let totalBytes = Array.from(cache.values()).reduce(
-        (total, item) => total + Number(item?.size || 0),
-        0
-      );
-      if (cache.size > singlePageSnapshotMaxEntries || totalBytes > singlePageSnapshotLimitBytes) {
-        const candidates = Array.from(cache.entries())
-          .filter(([candidateKey]) => candidateKey !== key)
-          .sort((left, right) => Number(left[1]?.lastUsed || 0) - Number(right[1]?.lastUsed || 0));
-        while ((cache.size > singlePageSnapshotMaxEntries || totalBytes > singlePageSnapshotLimitBytes) && candidates.length > 0) {
-          const [expiredKey, expired] = candidates.shift();
-          cache.delete(expiredKey);
-          totalBytes -= Number(expired?.size || 0);
-          if (expired?.url) URL.revokeObjectURL(expired.url);
-        }
-      }
+      const budget = trimDecodedPageCache(cache, {
+        protectedKey: key, maxEntries: singlePageSnapshotMaxEntries, maxBytes: singlePageSnapshotLimitBytes,
+        onEvict: item => { if (item?.url) URL.revokeObjectURL(item.url); }
+      });
+      const totalBytes = budget.encodedBytes;
       window.__pdfVisitedPageCacheInfo = {
         pages: cache.size,
         bytes: totalBytes,
+        decodedBytes: budget.decodedBytes,
+        totalBytes: budget.totalBytes,
         limitBytes: singlePageSnapshotLimitBytes,
         maxEntries: singlePageSnapshotMaxEntries
       };
@@ -635,7 +648,8 @@ const PDFViewer = ({
     getSinglePageSnapshotKey,
     notifySinglePageSnapshotPersisted,
     singlePageSnapshotLimitBytes,
-    singlePageSnapshotMaxEntries
+    singlePageSnapshotMaxEntries,
+    singlePageSnapshotScope
   ]);
 
   const installSinglePagePreview = useCallback(({
@@ -646,84 +660,91 @@ const PDFViewer = ({
     snapshotScale,
     scope,
     pendingKey,
-    requestToken
+    requestToken,
+    signal
   }) => {
-    if (!blob) return;
-    const page = Number(pageNumber);
-    const cacheKey = getDirectionalPreviewCacheKey(scope, page);
-    const generation = singlePageSnapshotGenerationRef.current;
-    const url = URL.createObjectURL(blob);
-    const image = new Image();
-    image.onload = () => {
-      releaseDirectionalPreviewRequest(
-        singlePagePreviewPendingRef.current,
-        pendingKey,
-        requestToken
-      );
-      const current = Number(singlePageCurrentRef.current) || 1;
-      const direction = singlePageDirectionRef.current || 1;
-      const isCurrentTarget = page === current || page === current + direction;
-      if (
-        singlePageSnapshotGenerationRef.current !== generation ||
-        singlePageSnapshotScopeRef.current !== scope ||
-        !isCurrentTarget
-      ) {
+    if (!blob || signal?.aborted) return Promise.resolve(false);
+    return new Promise(resolve => {
+      const page = Number(pageNumber);
+      const cacheKey = getDirectionalPreviewCacheKey(scope, page);
+      const generation = singlePageSnapshotGenerationRef.current;
+      const url = URL.createObjectURL(blob);
+      const image = new Image();
+      const cancel = () => {
+        releaseDirectionalPreviewRequest(singlePagePreviewPendingRef.current, pendingKey, requestToken);
+        image.onload = null;
+        image.onerror = null;
+        image.src = '';
         URL.revokeObjectURL(url);
-        return;
-      }
-      const cache = singlePagePreviewCacheRef.current;
-      const previous = cache.get(cacheKey);
-      if (previous?.decodedImage) {
-        try { previous.decodedImage.src = ''; } catch (error) { /* already released */ }
-      }
-      if (previous?.url) URL.revokeObjectURL(previous.url);
-      cache.set(cacheKey, {
-        pageNumber: page,
-        scope,
-        url,
-        decodedImage: image,
-        size: blob.size,
-        cssWidth,
-        cssHeight,
-        snapshotScale: Number(snapshotScale) || 1,
-        lastUsed: Date.now(),
-        preview: true
-      });
-      const preferred = new Set([
-        getDirectionalPreviewCacheKey(scope, current),
-        getDirectionalPreviewCacheKey(scope, current + direction)
-      ]);
-      const evictionCandidates = Array.from(cache.entries())
-        .filter(([candidate]) => !preferred.has(candidate))
-        .sort((left, right) => Number(left[1]?.lastUsed || 0) - Number(right[1]?.lastUsed || 0));
-      while (cache.size > 2) {
-        const currentKey = getDirectionalPreviewCacheKey(scope, current);
-        const [expiredKey, expired] = evictionCandidates.shift() || Array.from(cache.entries())
-          .filter(([candidate]) => candidate !== currentKey)
-          .sort((left, right) => Number(left[1]?.lastUsed || 0) - Number(right[1]?.lastUsed || 0))[0] || [];
-        if (!expiredKey) break;
-        cache.delete(expiredKey);
-        if (expired?.decodedImage) {
-          try { expired.decodedImage.src = ''; } catch (error) { /* already released */ }
+        resolve(false);
+      };
+      signal?.addEventListener('abort', cancel, { once: true });
+      image.onload = () => {
+        signal?.removeEventListener('abort', cancel);
+        releaseDirectionalPreviewRequest(
+          singlePagePreviewPendingRef.current,
+          pendingKey,
+          requestToken
+        );
+        const current = Number(singlePageCurrentRef.current) || 1;
+        const direction = singlePageDirectionRef.current || 1;
+        const isCurrentTarget = page === current || page === current + direction;
+        if (
+          singlePageSnapshotGenerationRef.current !== generation ||
+          singlePageSnapshotScopeRef.current !== scope ||
+          !isCurrentTarget
+        ) {
+          URL.revokeObjectURL(url);
+          resolve(false);
+          return;
         }
-        if (expired?.url) URL.revokeObjectURL(expired.url);
-      }
-      image.onload = null;
-      image.onerror = null;
-      setSinglePagePreviewVersion(version => version + 1);
-    };
-    image.onerror = () => {
-      releaseDirectionalPreviewRequest(
-        singlePagePreviewPendingRef.current,
-        pendingKey,
-        requestToken
-      );
-      image.onload = null;
-      image.onerror = null;
-      URL.revokeObjectURL(url);
-    };
-    image.src = url;
-  }, []);
+        const cache = singlePagePreviewCacheRef.current;
+        const previous = cache.get(cacheKey);
+        if (previous?.decodedImage) {
+          try { previous.decodedImage.src = ''; } catch (error) { /* already released */ }
+        }
+        if (previous?.url) URL.revokeObjectURL(previous.url);
+        cache.set(cacheKey, {
+          pageNumber: page,
+          scope,
+          url,
+          decodedImage: image,
+          size: blob.size,
+          cssWidth,
+          cssHeight,
+          decodedBytes: (image.naturalWidth || cssWidth || 0) * (image.naturalHeight || cssHeight || 0) * 4,
+          snapshotScale: Number(snapshotScale) || 1,
+          lastUsed: Date.now(),
+          preview: true
+        });
+        trimDecodedPageCache(cache, {
+          protectedKey: getDirectionalPreviewCacheKey(scope, current), maxEntries: 2,
+          maxBytes: Math.min(singlePageSnapshotLimitBytes, 16 * 1024 * 1024),
+          onEvict: item => {
+            if (item?.decodedImage) item.decodedImage.src = '';
+            if (item?.url) URL.revokeObjectURL(item.url);
+          }
+        });
+        image.onload = null;
+        image.onerror = null;
+        setSinglePagePreviewVersion(version => version + 1);
+        resolve(true);
+      };
+      image.onerror = () => {
+        signal?.removeEventListener('abort', cancel);
+        releaseDirectionalPreviewRequest(
+          singlePagePreviewPendingRef.current,
+          pendingKey,
+          requestToken
+        );
+        image.onload = null;
+        image.onerror = null;
+        URL.revokeObjectURL(url);
+        resolve(false);
+      };
+      image.src = url;
+    });
+  }, [singlePageSnapshotLimitBytes]);
 
     const captureSinglePageSnapshot = useCallback((pageNumber) => {
       const key = getSinglePageSnapshotKey(pageNumber);
@@ -972,6 +993,7 @@ const PDFViewer = ({
     // visible page. Keep only the decoder for the page the user can still see.
     singlePageSnapshotDecodeHandlesRef.current.forEach((handle, key) => {
       if (key === currentKey) return;
+      clearTimeout(handle.upgradeTimer);
       handle.image.onload = null;
       handle.image.onerror = null;
       try { handle.image.src = ''; } catch (error) { /* already released */ }
@@ -1132,7 +1154,28 @@ const PDFViewer = ({
   const [visiblePageRange, setVisiblePageRange] = useState({ start: 1, end: 3 });
   
   // 矢量数据状态
-  const [pageVectors, setPageVectors] = useState({}); 
+  const [pageVectors, setResidentPageVectors] = useState({});
+  const pageVectorsRef = useRef(pageVectors);
+  const setPageVectors = useCallback(update => {
+    const previous = pageVectorsRef.current;
+    const next = typeof update === 'function' ? update(previous) : update;
+    Object.entries(next || {}).forEach(([page, vectors]) => {
+      if (Array.isArray(vectors) && previous[page] !== vectors) {
+        multiPageBatchService.cachePageVectors(Number(page), vectors)
+          .catch(error => console.warn('矢量缓存写入失败:', error.message));
+      }
+    });
+    const resident = retainNearbyPageVectors(next, singlePageCurrentRef.current);
+    pageVectorsRef.current = resident;
+    setResidentPageVectors(resident);
+  }, []);
+
+  useEffect(() => {
+    pageVectorsRef.current = {};
+    setResidentPageVectors({});
+    multiPageBatchService.activateVectorDocument(null,
+      VectorExtractionUtils.getDocumentCacheKey() || singlePageSnapshotDocumentKey);
+  }, [singlePageSnapshotDocumentKey]);
   
   // 矢量可视化调试开关
   const [showVectorDebug, setShowVectorDebug] = useState(false);
@@ -1154,7 +1197,6 @@ const PDFViewer = ({
   const displayedWeldPendingRef = useRef(new Map());
   const pendingWeldRefreshPagesRef = useRef(new Set());
   const currentPageRef = useRef(currentPage);
-  const pageVectorsRef = useRef(pageVectors);
   const textLikeDetectionsCacheRef = useRef(new Map());
   const showWeldDebugRef = useRef(showWeldDebug);
   const multiPageNumberPreviewRef = useRef(false);
@@ -1242,6 +1284,24 @@ const PDFViewer = ({
   useEffect(() => {
     pageVectorsRef.current = pageVectors;
   }, [pageVectors]);
+
+  useEffect(() => {
+    const page = Number(currentPage) || 1;
+    const resident = retainNearbyPageVectors(pageVectorsRef.current, page);
+    if (Object.keys(resident).length !== Object.keys(pageVectorsRef.current).length) {
+      pageVectorsRef.current = resident; setResidentPageVectors(resident);
+    }
+    if (!(showVectorDebug || showWeldDebug || showFittingDebug || showPipeLengthDebug || showWeldNumbers || multiPageNumberPreview) || resident[page]) return;
+    let cancelled = false;
+    const scope = multiPageBatchService.vectorPages.scope;
+    multiPageBatchService.getPageVectors(page).then(vectors => {
+      if (!cancelled && scope === multiPageBatchService.vectorPages.scope && vectors.length) {
+        setPageVectors(prev => ({ ...prev, [page]: vectors }));
+      }
+    }).catch(error => console.warn('读取页面矢量失败:', error.message));
+    return () => { cancelled = true; };
+  }, [currentPage, singlePageSnapshotDocumentKey, showVectorDebug, showWeldDebug,
+    showFittingDebug, showPipeLengthDebug, showWeldNumbers, multiPageNumberPreview, setPageVectors]);
 
   useEffect(() => {
     showWeldDebugRef.current = showWeldDebug;
@@ -1580,7 +1640,8 @@ const PDFViewer = ({
       const inferredSnapshotScale = standardInfo?.width > 0
         ? 0.625 * (Number(previewInfo.width) / Number(standardInfo.width))
         : 0.625;
-      installSinglePagePreview({
+      handedToDecoder = true;
+      return await installSinglePagePreview({
         pageNumber: page,
         blob,
         cssWidth: Number(previewInfo.width),
@@ -1588,10 +1649,9 @@ const PDFViewer = ({
         snapshotScale: renderScale > 0 ? renderScale / 2 : inferredSnapshotScale,
         scope,
         pendingKey,
-        requestToken
+        requestToken,
+        signal
       });
-      handedToDecoder = true;
-      return true;
     } catch (error) {
       if (error?.name !== 'AbortError') {
         console.debug('[PDF preview cache] preview unavailable:', page, error?.message || error);
@@ -1608,6 +1668,52 @@ const PDFViewer = ({
     }
   }, [imageFirstPdfMode, installSinglePagePreview, singlePageSnapshotScope]);
 
+  const remoteCurrentPageHasPreview = remotePageCacheStateMatchesScope && Boolean(remotePageCacheState.previews?.[currentPage]);
+  const remoteCurrentPageHasFullImage = remotePageCacheStateMatchesScope && Boolean(remotePageCacheState.pages?.[currentPage]);
+  remotePageLoadingLiveRef.current = {
+    state: remotePageCacheState, loadRemotePagePreview, loadRemotePageSnapshot,
+    singlePageLiveCanvasKey,
+  };
+  useEffect(() => {
+    const sessionKey = `${singlePageSnapshotScope}:${currentPage}`;
+    if (remotePageLoadingDeadlineRef.current.key !== sessionKey) {
+      remotePageLoadingDeadlineRef.current = { key: sessionKey, startedAt: Date.now() };
+      setRemoteCanvasFallbackPage(0);
+    }
+    if (!serverPageCacheMode || !imageFirstPdfMode || snapshotLoadsSuspendedRef.current ||
+        !remotePageCacheStateMatchesScope || !remotePageCacheState.cacheId ||
+        (!remoteCurrentPageHasPreview && !remoteCurrentPageHasFullImage)) return undefined;
+    const page = Number(currentPage) || 1;
+    const key = getSinglePageSnapshotKey(page);
+    const previewKey = getDirectionalPreviewCacheKey(singlePageSnapshotScope, page);
+    // Metadata can arrive after the local Canvas has already finished. Keep
+    // that usable surface mounted while upgrading to a server image.
+    if (remotePageLoadingLiveRef.current.singlePageLiveCanvasKey === `${page}:${Number(singlePageScaleRef.current) || 1}`) {
+      setRemoteCanvasFallbackPage(page);
+    }
+    const hasSurface = () => singlePageSnapshotCacheRef.current.has(key) ||
+      singlePagePreviewCacheRef.current.has(previewKey) ||
+      remotePageLoadingLiveRef.current.singlePageLiveCanvasKey === `${page}:${Number(singlePageScaleRef.current) || 1}`;
+    return startRemotePageLoading({
+      fallbackDelayMs: Math.max(0, REMOTE_PAGE_FALLBACK_MS -
+        (Date.now() - remotePageLoadingDeadlineRef.current.startedAt)),
+      hasSurface,
+      hasFullImage: () => singlePageSnapshotCacheRef.current.has(key),
+      previewAvailable: remoteCurrentPageHasPreview,
+      fullAvailable: remoteCurrentPageHasFullImage,
+      loadPreview: signal => remotePageLoadingLiveRef.current.loadRemotePagePreview(
+        page, remotePageLoadingLiveRef.current.state, signal),
+      loadFullImage: () => remotePageLoadingLiveRef.current.loadRemotePageSnapshot(
+        page, remotePageLoadingLiveRef.current.state),
+      enableCanvas: () => setRemoteCanvasFallbackPage(page),
+      isBusy: () => pdfGestureActiveRef.current || window.__pdfExportInProgress ||
+        Date.now() - lastPdfInteractionAtRef.current < BACKGROUND_CACHE_INTERACTION_QUIET_MS,
+    });
+  }, [currentPage, getSinglePageSnapshotKey, imageFirstPdfMode, serverPageCacheMode,
+    remotePageCacheState.cacheId, remotePageCacheStateMatchesScope,
+    remoteCurrentPageHasPreview, remoteCurrentPageHasFullImage, singlePageSnapshotScope,
+    remotePageLoadingResumeNonce, remotePageCacheRetryNonce]);
+
   useEffect(() => {
     if (!imageFirstPdfMode || !remotePageCacheStateMatchesScope || !remotePageCacheState?.cacheId) {
       return undefined;
@@ -1618,12 +1724,22 @@ const PDFViewer = ({
       currentPage: current,
       direction,
       totalPages: Number(backgroundPageCacheProgress.total || numPages || 0)
-    }).filter(page => remotePageCacheState.previews?.[page]);
+    }).filter(page => page !== current && remotePageCacheState.previews?.[page]);
     const controller = new AbortController();
-    targets.forEach(page => {
-      loadRemotePagePreview(page, remotePageCacheState, controller.signal);
-    });
-    const keep = new Set(targets.map(page => (
+    let timer;
+    const prefetchPreview = () => {
+      if (controller.signal.aborted) return;
+      const currentReady = singlePageSnapshotCacheRef.current.has(getSinglePageSnapshotKey(current)) ||
+        singlePagePreviewCacheRef.current.has(getDirectionalPreviewCacheKey(singlePageSnapshotScope, current));
+      if (!currentReady || pdfGestureActiveRef.current ||
+          Date.now() - lastPdfInteractionAtRef.current < BACKGROUND_CACHE_INTERACTION_QUIET_MS) {
+        timer = setTimeout(prefetchPreview, 100);
+        return;
+      }
+      targets.forEach(page => loadRemotePagePreview(page, remotePageCacheState, controller.signal));
+    };
+    timer = setTimeout(prefetchPreview, 100);
+    const keep = new Set([current, ...targets].map(page => (
       getDirectionalPreviewCacheKey(singlePageSnapshotScope, page)
     )));
     let removed = false;
@@ -1639,10 +1755,11 @@ const PDFViewer = ({
     if (removed) {
       setSinglePagePreviewVersion(version => version + 1);
     }
-    return () => controller.abort();
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [
     backgroundPageCacheProgress.total,
     currentPage,
+    getSinglePageSnapshotKey,
     imageFirstPdfMode,
     loadRemotePagePreview,
     numPages,
@@ -1672,6 +1789,7 @@ const PDFViewer = ({
         setRemotePageCacheState({
           scope: singlePageSnapshotScope,
           cacheId: status.cacheId || '',
+          total,
           pages,
           previews,
           status: status.status || 'missing'
@@ -1697,7 +1815,7 @@ const PDFViewer = ({
   }, [file, imageFirstPdfMode, singlePageSnapshotDocumentKey, singlePageSnapshotScope]);
 
   useEffect(() => {
-    if (!serverPageCacheMode || snapshotLoadsSuspendedRef.current) return undefined;
+    if (!serverPageCacheMode || imageFirstPdfMode || snapshotLoadsSuspendedRef.current) return undefined;
     const page = Number(currentPage);
     const previewAvailable = remotePageCacheStateMatchesScope && Boolean(remotePageCacheState.previews?.[page]);
     const previewDecoded = singlePagePreviewCacheRef.current.has(
@@ -1716,47 +1834,10 @@ const PDFViewer = ({
     remotePageCacheState,
     remotePageCacheStateMatchesScope,
     serverPageCacheMode,
+    imageFirstPdfMode,
     singlePagePreviewVersion,
     singlePageSnapshotScope,
     singlePageSnapshotDiskIndexVersion,
-    singlePageSnapshotVersion
-  ]);
-
-  useEffect(() => {
-    setRemoteCanvasFallbackPage(0);
-    const pageNumber = Number(currentPage) || 1;
-    if (
-      !imageFirstPdfMode ||
-      !remotePageCacheStateMatchesScope ||
-      !remotePageCacheState.pages?.[pageNumber] ||
-      snapshotLoadsSuspendedRef.current
-    ) return undefined;
-    const key = getSinglePageSnapshotKey(pageNumber);
-    if (singlePageSnapshotCacheRef.current.has(key)) return undefined;
-
-    // Do not start a full PDF.js render for pages that the user is merely
-    // passing through. If the cached PNG is delayed or unavailable after the
-    // page settles, the live Canvas becomes a guaranteed display fallback.
-    const timer = setTimeout(() => {
-      if (
-        Number(singlePageCurrentRef.current) === pageNumber &&
-        !singlePageSnapshotCacheRef.current.has(key)
-      ) {
-        // The first request may have been aborted while the user was still
-        // paging. Retry after the page settles before enabling the Canvas.
-        loadRemotePageSnapshot(pageNumber, remotePageCacheState);
-        setRemoteCanvasFallbackPage(pageNumber);
-      }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [
-    currentPage,
-    getSinglePageSnapshotKey,
-    imageFirstPdfMode,
-    loadRemotePageSnapshot,
-    remotePageCacheState,
-    remotePageCacheState.pages,
-    remotePageCacheStateMatchesScope,
     singlePageSnapshotVersion
   ]);
 
@@ -1795,6 +1876,14 @@ const PDFViewer = ({
     // Persist nearby server snapshots without decoding them. The next page
     // turn is then local while decoded image memory remains bounded.
     const warm = async () => {
+      if (controller.signal.aborted) return;
+      const currentReady = singlePageSnapshotCacheRef.current.has(getSinglePageSnapshotKey(current)) ||
+        singlePagePreviewCacheRef.current.has(getDirectionalPreviewCacheKey(singlePageSnapshotScope, current));
+      if (!currentReady || pdfGestureActiveRef.current ||
+          Date.now() - lastPdfInteractionAtRef.current < BACKGROUND_CACHE_INTERACTION_QUIET_MS) {
+        timer = setTimeout(warm, 100);
+        return;
+      }
       for (const page of candidates) {
         if (controller.signal.aborted) return;
         const warmKey = `${remotePageCacheState.cacheId}:${page}`;
@@ -1826,7 +1915,7 @@ const PDFViewer = ({
         }
       }
     };
-    const timer = setTimeout(warm, 80);
+    let timer = setTimeout(warm, 100);
     return () => {
       clearTimeout(timer);
       controller.abort();
@@ -1891,6 +1980,9 @@ const PDFViewer = ({
           fullPagePrefetchBlockedRef.current.blocked) return;
       if (
         window.__pdfExportInProgress ||
+        pdfGestureActiveRef.current ||
+        (!singlePageSnapshotCacheRef.current.has(getSinglePageSnapshotKey(singlePageCurrentRef.current)) &&
+          !singlePagePreviewCacheRef.current.has(getDirectionalPreviewCacheKey(singlePageSnapshotScope, singlePageCurrentRef.current))) ||
         navigator.scheduling?.isInputPending?.() ||
         Date.now() - lastPdfInteractionAtRef.current < BACKGROUND_CACHE_INTERACTION_QUIET_MS
       ) {
@@ -2026,6 +2118,7 @@ const PDFViewer = ({
       setRemotePageCacheState({
         scope: singlePageSnapshotScope,
         cacheId: status?.cacheId || '',
+        total: totalPages,
         pages,
         previews,
         status: status?.status || 'missing'
@@ -2060,9 +2153,6 @@ const PDFViewer = ({
         failed: Array.isArray(status?.failed) ? status.failed.length : 0,
         skipped: 0, source: 'server-disk-cache', cacheId: status?.cacheId || ''
       };
-      loadRemotePageSnapshot(Number(singlePageCurrentRef.current), {
-        cacheId: status?.cacheId || '', pages, status: status?.status || ''
-      });
     };
 
     const getSourceBlob = async () => {
@@ -2186,6 +2276,8 @@ const PDFViewer = ({
       lastIdleRuntimeReleaseAtRef.current = 0;
       if (snapshotLoadsSuspendedRef.current) {
         snapshotLoadsSuspendedRef.current = false;
+        remotePageLoadingDeadlineRef.current = { key: '', startedAt: 0 };
+        setRemotePageLoadingResumeNonce(value => value + 1);
         setSinglePageSnapshotVersion(version => version + 1);
       }
       // Full-page snapshot rendering, PNG encoding and IndexedDB writes are
@@ -2317,8 +2409,7 @@ const PDFViewer = ({
     const getEstimatedDecodedPageBytes = () => {
       let bytes = 0;
       singlePageSnapshotCacheRef.current.forEach(item => {
-        bytes += Math.max(0, Number(item?.cssWidth || 0)) *
-          Math.max(0, Number(item?.cssHeight || 0)) * 4;
+        bytes += getDecodedPageBytes(item);
       });
       const visibleCanvas = containerRef.current?.querySelector(
         `[data-page-number="${Number(singlePageCurrentRef.current) || 1}"] canvas`
@@ -2754,8 +2845,7 @@ const PDFViewer = ({
       ), 0);
       let decodedSnapshotBytes = 0;
       singlePageSnapshotCacheRef.current.forEach(item => {
-        decodedSnapshotBytes += Math.max(0, Number(item?.cssWidth || 0)) *
-          Math.max(0, Number(item?.cssHeight || 0)) * 4;
+        decodedSnapshotBytes += getDecodedPageBytes(item);
       });
       const jsHeapRatio = jsHeapUsed > 0 && jsHeapLimit > 0 ? jsHeapUsed / jsHeapLimit : 0;
       const memoryPressure = (
@@ -3270,7 +3360,7 @@ const PDFViewer = ({
         try {
           let extractedVectorsForCurrentPage = false;
           if (!pageVectors[currentPage] || pageVectors[currentPage].length === 0) {
-            const page = pageObjectsRef?.current?.get?.(currentPage);
+            const page = pageObjectsRef?.current?.get?.(currentPage) || await pdfDocumentRef?.getPage(currentPage);
             if (page) {
               const { VectorExtractionUtils } = await import('../utils/vectorExtractionUtils');
               const vectors = await VectorExtractionUtils.extractVectors(page);
@@ -3452,14 +3542,14 @@ const PDFViewer = ({
       const debounceTimer = setTimeout(async () => {
         try {
           // 获取当前页的 page 对象
-          if (pageObjectsRef && pageObjectsRef.current && pageObjectsRef.current.has(currentPage)) {
+          if (pdfDocumentRef?.getPage) {
             // 检查是否已经提取过
             if (pageVectors[currentPage] && pageVectors[currentPage].length > 0) {
               console.log(`✅ [矢量调试] 第 ${currentPage} 页矢量已缓存，跳过重复提取`);
               return;
             }
             
-            const page = pageObjectsRef.current.get(currentPage);
+            const page = pageObjectsRef.current.get(currentPage) || await pdfDocumentRef.getPage(currentPage);
             const { VectorExtractionUtils } = await import('../utils/vectorExtractionUtils');
             
             console.log(`🔄 [矢量调试] 开始提取第 ${currentPage} 页矢量...`);
@@ -3484,7 +3574,7 @@ const PDFViewer = ({
     return () => {
       delete window.enableVectorDebug;
     };
-  }, [showVectorDebug, showFittingDebug, showPipeLengthDebug, renderMode, currentPage, pageObjectsRef, pageVectors]);
+  }, [showVectorDebug, showFittingDebug, showPipeLengthDebug, renderMode, currentPage, pageObjectsRef, pageVectors, pdfDocumentRef]);
 
   // 暴露数据到全局，供焊点文字检查工具使用
   useEffect(() => {
@@ -3672,9 +3762,11 @@ const PDFViewer = ({
   const clearSinglePageNumberingSelection = useCallback(() => {
     setSelectedStartWeldId(null);
     setSelectedStartWeld(null);
-    setNumberingSegments([]);
-    setNumberlessNumberingSegmentKeys([]);
-    setOrderedNumberingWelds([]);
+    // The numbering effect also observes numberingSegments. Preserve empty
+    // arrays so an already-disabled mode cannot schedule itself forever.
+    setNumberingSegments(previous => previous.length ? [] : previous);
+    setNumberlessNumberingSegmentKeys(previous => previous.length ? [] : previous);
+    setOrderedNumberingWelds(previous => previous.length ? [] : previous);
   }, []);
 
   const exitSinglePageNumberingMode = useCallback(() => {
@@ -5227,6 +5319,8 @@ const PDFViewer = ({
     }
   }, [hookDraggingAnnotation]);
 
+  pdfGestureActiveRef.current = isDragging || Boolean(hookDraggingAnnotation);
+
   // 使用PDF事件处理器Hook
   const {
     handleMouseDown,
@@ -5709,6 +5803,7 @@ const PDFViewer = ({
         >
           <svg
             data-pdf-annotation-id={dragPreviewAnnotations ? undefined : annotation.id}
+            data-preview-id={dragPreviewAnnotations ? String(annotation.id) : undefined}
             style={{
               position: 'absolute',
               top: `${boundingBox.minY * scale}px`,
@@ -6379,7 +6474,7 @@ const PDFViewer = ({
 
           {/* 选中状态的高亮效果 - 优雅的高亮设计 */}
           {isAnnotationHighlighted && (
-            <g>
+            <g data-preview-highlight="true">
               {/* 外层光晕效果 */}
               <rect
                 x={boundingBox.minX - 8}
@@ -6560,11 +6655,30 @@ const PDFViewer = ({
     return () => window.removeEventListener('luotu-annotation-memory-checkpoint', handleAnnotationMemoryCheckpoint);
   }, [pageObjectsRef, trimSinglePageSnapshotsToCurrent]);
 
+  const createDragLeaderConnection = useCallback(annotation => {
+    const { displayText, fontSize } = hookProcessAnnotationText(annotation);
+    const size = hookCalculateAnnotationSize(displayText, fontSize, annotation);
+    let shape = annotation.borderShape;
+    let boundary;
+    if (['circle', 'split-circle', 'shop-weld'].includes(shape)) { shape = 'circle'; boundary = size.circleRadius; }
+    else if (['diamond', 'field-weld'].includes(shape)) { shape = 'diamond'; boundary = size.diamondRadius; }
+    else if (shape === 'rectangle') boundary = size.rectangleHalfSide;
+    else if (shape === 'text-rectangle') boundary = { width: size.textRectangleWidth, height: size.textRectangleHeight };
+    else if (shape === 'pipe-tag') boundary = {
+      width: 23 * (size.diagonalLength || 56.7) / 10,
+      height: 4 * (size.diagonalLength || 56.7) / 10,
+    };
+    else if (shape === 'none') return next => ({ connectionX: next.endX, connectionY: next.endY });
+    else return null;
+    return next => hookCalculateConnectionPoint(next, shape, boundary);
+  }, [hookProcessAnnotationText, hookCalculateAnnotationSize, hookCalculateConnectionPoint]);
+
   const renderAnnotationDragPreview = pageNumber => (
     <AnnotationDragPreview
       pageNumber={pageNumber}
       scale={scale}
       renderAnnotations={renderAnnotations}
+      createLeaderConnection={createDragLeaderConnection}
       ref={preview => {
         if (preview) annotationDragPreviewRefs.current.set(pageNumber, preview);
         else annotationDragPreviewRefs.current.delete(pageNumber);
@@ -7421,14 +7535,19 @@ const PDFViewer = ({
   }, [currentPage, scrollToPage]);
 
   useEffect(() => {
-
+    // A new file must never expose the previous (now destroyed) document to
+    // batch sizing or recognition while its cached metadata is being queried.
+    setPdfDocumentRef(null);
+    setPdfDocumentCacheKey('');
+    onPdfDocumentChange?.(null);
+    setNumPages(null);
     if (file) {
       setLoading(true);
       setError(null);
       // 重置视图状态
       setViewOffset({ x: 0, y: 0 });
     }
-  }, [file]);
+  }, [file, onPdfDocumentChange, setNumPages]);
 
   // 获取缓存的页面信息
   const getCachedPageInfo = useCallback((pageNumber) => {
@@ -8753,7 +8872,8 @@ const PDFViewer = ({
   };
 
   // 转换焊点编号为标注
-  const handleConvertWeldsToAnnotations = useCallback(() => {
+  const handleConvertWeldsToAnnotations = useCallback(async () => {
+    try {
     const hasBatchWelds = multiPageNumberPreview && multiPageNumberWelds.length > 0;
     if ((!displayedWelds || displayedWelds.length === 0) && !hasBatchWelds) {
       message.warning('当前没有识别到焊点，无法生成编号');
@@ -8790,7 +8910,7 @@ const PDFViewer = ({
       // 后续翻页、识别刷新或父状态回显不得再次改变编号。
       setMultiPageNumberWelds(correctedWelds);
       multiPageBatchService.setCorrectedNumberedWelds(weldsToGenerate);
-      const correctedAnnotations = multiPageBatchService.convertWeldsToAnnotations(
+      const correctedAnnotations = await multiPageBatchService.convertWeldsToAnnotationsFromCache(
         scale,
         pendingBatchRule,
         'KEEP_ORDER',
@@ -8857,7 +8977,7 @@ const PDFViewer = ({
       let nextNumber = startNum;
       const newAnnotations = [];
 
-      targetPages.forEach((pageNum) => {
+      for (const pageNum of targetPages) {
         const pageWelds = getNumberingWeldsForPage(pageNum);
         const pageSegments = scopedNumberingSegments.filter(segment => (
           Number(pageNum) === Number(segment.page || currentPage)
@@ -8865,7 +8985,7 @@ const PDFViewer = ({
         const hasSegmentStoredWelds = pageSegments.some(segment => (
           Array.isArray(segment?.sourceRangeWelds) && segment.sourceRangeWelds.length > 0
         ));
-        if ((!pageWelds || pageWelds.length === 0) && !hasSegmentStoredWelds) return;
+        if ((!pageWelds || pageWelds.length === 0) && !hasSegmentStoredWelds) continue;
 
         const pagePipelineNumber = getPagePipelineForNumbering(pageNum, pageWelds) || currentPipelineNumber;
 
@@ -8902,7 +9022,7 @@ const PDFViewer = ({
         const numberedWeldsForPage = orderedWeldsForPage.filter(
           weld => !numberlessWeldKeys.has(getWeldSelectionKey(weld))
         );
-        if (numberedWeldsForPage.length === 0) return;
+        if (numberedWeldsForPage.length === 0) continue;
 
         const pageLayoutData = calculateWeldLayout(
           numberedWeldsForPage,
@@ -8913,7 +9033,7 @@ const PDFViewer = ({
           getPageTextRegions(pageNum, textDetections),
           {
             normalizedPlacementArea: latestAreasRef.current.weldRecognition || globalWeldRecognitionArea,
-            graphicVectors: pageVectors[pageNum] || [],
+            graphicVectors: await multiPageBatchService.getPageVectors(pageNum),
             circleDiameter: annotationFrameSize || 56.7,
             allowLeaderThroughGraphics: true,
             allowLeaderCrossing: false
@@ -8960,7 +9080,7 @@ const PDFViewer = ({
 
           nextNumber += increment;
         });
-      });
+      }
 
       if (newAnnotations.length === 0) {
         message.warning('未能生成标注，请确认同管线页已完成焊点识别，且起止 Path ID 在对应页存在');
@@ -8995,7 +9115,7 @@ const PDFViewer = ({
       getPageTextRegions(currentPage, textDetections),
       {
         normalizedPlacementArea: latestAreasRef.current.weldRecognition || globalWeldRecognitionArea,
-        graphicVectors: pageVectors[currentPage] || [],
+        graphicVectors: await multiPageBatchService.getPageVectors(currentPage),
         circleDiameter: annotationFrameSize || 56.7,
         allowLeaderThroughGraphics: true,
         allowLeaderCrossing: false
@@ -9078,6 +9198,8 @@ const PDFViewer = ({
       setShowPipelineDebug(false);
       setShowVectorDebug(false);
     }
+
+    } catch (error) { console.error(error); message.error(error.message || "生成标注失败"); }
   }, [
     displayedWelds,
     numberingSegments,
@@ -9175,10 +9297,13 @@ const PDFViewer = ({
     const pageEntries = Object.entries(vectors || {});
     console.log('📐 多页矢量提取完成:', {
       pages: pageEntries.length,
-      totalVectors: pageEntries.reduce((sum, [, pageItems]) => sum + (pageItems?.length || 0), 0)
+      totalVectors: pageEntries.reduce((sum, [, pageItems]) => sum + (pageItems?.length ?? pageItems?.vectorCount ?? 0), 0)
     });
     // 可以选择性地更新到 pageVectors 状态
-    setPageVectors(prev => ({ ...prev, ...vectors }));
+    const page = Number(singlePageCurrentRef.current) || 1;
+    multiPageBatchService.getPageVectors(page).then(items => {
+      if (Number(singlePageCurrentRef.current) === page) setPageVectors(prev => ({ ...prev, [page]: items }));
+    }).catch(error => console.warn('读取当前页矢量失败:', error.message));
   }, []);
 
   // 处理多页批量处理 - 文字识别完成
@@ -9959,31 +10084,21 @@ const PDFViewer = ({
     hasReopenedWeldSequenceCandidate
   ]);
 
-  useEffect(() => {
-    onWeldAdjustmentStateChange?.({
-      available: (
-        multiPageNumberPreview &&
-        pendingNumberingAnnotations.length === 0 &&
-        multiPageNumberWelds.length > 0
-      ) || (
-        !multiPageNumberPreview &&
-        (multiPageNumberWelds.length > 0 || hasReopenedWeldSequenceCandidate)
-      ),
-      mode: manualWeldInsertMode
-        ? 'insert'
-        : manualWeldDeleteMode ? 'delete' : 'idle',
-      handleAction: handleWeldAdjustmentAction
-    });
-  }, [
-    handleWeldAdjustmentAction,
-    manualWeldDeleteMode,
-    manualWeldInsertMode,
-    multiPageNumberPreview,
-    multiPageNumberWelds.length,
-    onWeldAdjustmentStateChange,
-    pendingNumberingAnnotations.length,
-    hasReopenedWeldSequenceCandidate
-  ]);
+  useWeldAdjustmentToolbarState({
+    available: (
+      multiPageNumberPreview &&
+      pendingNumberingAnnotations.length === 0 &&
+      multiPageNumberWelds.length > 0
+    ) || (
+      !multiPageNumberPreview &&
+      (multiPageNumberWelds.length > 0 || hasReopenedWeldSequenceCandidate)
+    ),
+    mode: manualWeldInsertMode
+      ? 'insert'
+      : manualWeldDeleteMode ? 'delete' : 'idle',
+    handleAction: handleWeldAdjustmentAction,
+    onStateChange: onWeldAdjustmentStateChange
+  });
 
   const handleNumberingWeldInteraction = useCallback((weld) => {
     if (manualWeldDeleteMode) {
@@ -10780,7 +10895,8 @@ const PDFViewer = ({
     ensureTargetPageWeldsForCompare
   ]);
 
-  const handleApplyCompareLayout = useCallback(() => {
+  const handleApplyCompareLayout = useCallback(async () => {
+    try {
     const matched = compareMatches.filter(item => item.status === 'matched' && item.targetWeld && item.annotation);
     if (matched.length === 0) {
       message.warning('没有可生成的匹配标注');
@@ -10801,7 +10917,7 @@ const PDFViewer = ({
       getPageTextRegions(targetPage, textDetections),
       {
         normalizedPlacementArea: latestAreasRef.current.weldRecognition || globalWeldRecognitionArea,
-        graphicVectors: pageVectors[targetPage] || [],
+        graphicVectors: await multiPageBatchService.getPageVectors(targetPage),
         circleDiameter: annotationFrameSize || 56.7,
         allowLeaderThroughGraphics: true,
         allowLeaderCrossing: false
@@ -10835,6 +10951,10 @@ const PDFViewer = ({
     });
     onBatchAddAnnotations?.(nextAnnotations, null);
     message.success(`已生成 ${nextAnnotations.length} 个对照标注`);
+    } catch (error) {
+      console.error('生成对照标注失败:', error);
+      message.error(`生成对照标注失败: ${error.message}`);
+    }
   }, [
     compareMatches,
     compareSourceFile,
@@ -11334,10 +11454,25 @@ const PDFViewer = ({
   const handleDocumentLoadSuccess = useCallback((pdf) => {
     console.log('📄 PDF文档加载成功，保存文档引用');
     setPdfDocumentRef(pdf);
+    multiPageBatchService.activateVectorDocument(pdf);
     setPdfDocumentCacheKey(singlePageSnapshotDocumentKey);
     onPdfDocumentChange?.(pdf);
     onDocumentLoadSuccess(pdf);
   }, [onDocumentLoadSuccess, onPdfDocumentChange, singlePageSnapshotDocumentKey]);
+
+  // Image-only pages have no PDF.js onPageLoadSuccess. Use the same snapshot
+  // geometry already used by annotation placement for the toolbar/OCR sizing.
+  useEffect(() => {
+    if (!imageFirstPdfMode || !activeDisplayedPageSnapshot) return;
+    const size = getAnnotationPageSizeFromSnapshot(activeDisplayedPageSnapshot);
+    if (!size) return;
+    setPageSize(previous => {
+      if (previous.width === size.width && previous.height === size.height &&
+          previous.widthMM === size.widthMM && previous.heightMM === size.heightMM) return previous;
+      return size;
+    });
+    onPageSizeChange?.(size);
+  }, [imageFirstPdfMode, activeDisplayedPageSnapshot, onPageSizeChange, setPageSize]);
 
   if (!file) {
     return (
@@ -11841,20 +11976,7 @@ const PDFViewer = ({
     activeDisplayedPageSnapshot &&
     (pdfDocumentCacheKey !== singlePageSnapshotDocumentKey || !numPages)
   );
-  const cacheProgressText = (() => {
-    const progress = backgroundPageCacheProgress;
-    if (!progress.running && progress.error) return '页面缓存失败';
-    if (progress.stage === 'uploading') {
-      const uploadedMb = Math.max(0, Number(progress.uploadedBytes || 0)) / (1024 * 1024);
-      const sourceMb = Math.max(0, Number(progress.sourceSize || 0)) / (1024 * 1024);
-      return sourceMb > 0
-        ? `页面缓存：上传 ${uploadedMb.toFixed(1)}/${sourceMb.toFixed(1)} MB`
-        : `页面缓存：已上传 ${uploadedMb.toFixed(1)} MB`;
-    }
-    if (progress.stage === 'queued') return '页面缓存：等待生成';
-    if (progress.stage === 'rendering' && progress.completed === 0) return '页面缓存：正在生成第1页';
-    return `页面缓存 ${progress.completed}/${progress.total}`;
-  })();
+
 
   return (
     <ViewerContainer 
@@ -11870,61 +11992,17 @@ const PDFViewer = ({
     >
       {numberingControlPanelPortal}
 
-      {backgroundPageCacheProgress.total > 0 && (
-        <div
-          onMouseDown={event => event.stopPropagation()}
-          onClick={event => event.stopPropagation()}
-          style={{
-            position: 'absolute',
-            left: 12,
-            bottom: 12,
-            zIndex: 2147482000,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 8px',
-            border: '1px solid rgba(0,0,0,0.18)',
-            borderRadius: 6,
-            background: 'rgba(255,255,255,0.94)',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-            fontSize: 12
-          }}
-        >
-            <span title={backgroundPageCacheProgress.error || ''}>
-              {cacheProgressText}
-              {backgroundPageCacheProgress.failed > 0 ? `，失败${backgroundPageCacheProgress.failed}` : ''}
-              {backgroundPageCacheProgress.skipped > 0 ? `，跳过超大页${backgroundPageCacheProgress.skipped}` : ''}
-            </span>
-          {!serverPageCacheMode && backgroundPageCacheProgress.running &&
-            backgroundPageCacheProgress.completed + backgroundPageCacheProgress.failed < backgroundPageCacheProgress.total && (
-            <Button
-              size="small"
-              onClick={() => setBackgroundPageCachePaused(value => !value)}
-              style={{ height: 24, padding: '0 8px' }}
-            >
-              {backgroundPageCachePaused ? '继续' : '暂停'}
-            </Button>
-          )}
-          {!backgroundPageCacheProgress.running &&
-            (backgroundPageCacheProgress.failed > 0 || backgroundPageCacheProgress.error) && (
-            <Button
-              size="small"
-              onClick={() => {
-                setBackgroundPageCacheProgress(previous => ({
-                  ...previous,
-                  running: true,
-                  failed: 0,
-                  error: ''
-                }));
-                setRemotePageCacheRetryNonce(value => value + 1);
-              }}
-              style={{ height: 24, padding: '0 8px' }}
-            >
-              重试缓存
-            </Button>
-          )}
-        </div>
-      )}
+      <PageCacheStatus
+        containerRef={pageCacheStatusContainerRef}
+        progress={backgroundPageCacheProgress}
+        paused={backgroundPageCachePaused}
+        serverMode={serverPageCacheMode}
+        onTogglePause={() => setBackgroundPageCachePaused(value => !value)}
+        onRetry={() => {
+          setBackgroundPageCacheProgress(previous => ({...previous, running: true, failed: 0, error: ''}));
+          setRemotePageCacheRetryNonce(value => value + 1);
+        }}
+      />
 
       {showImageFirstLoadingPage && (
         <PageViewport
@@ -11950,6 +12028,10 @@ const PDFViewer = ({
 
 
       <Document
+        key={singlePageSnapshotDocumentKey}
+        enabled={serverPageCacheMode && imageFirstPdfMode && typeof Blob !== 'undefined' && file instanceof Blob}
+        knownPageCount={remotePageCacheStateMatchesScope ? remotePageCacheState.total : 0}
+        eager={viewMode !== 'single' || Boolean(window.electronPrintMode)}
         file={file}
         suspense={false}
         onLoadSuccess={handleDocumentLoadSuccess}
