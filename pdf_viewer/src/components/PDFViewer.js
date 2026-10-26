@@ -144,8 +144,8 @@ import {
   createPageSelectionKey,
   isAnnotationRenderCacheHit
 } from '../utils/annotationRenderCache';
-import '../utils/DiagnoseWeldTextCoordinates';
-import '../utils/DebugWeldTextMatch';
+import { capturePdfPageSnapshot } from '../utils/capturePdfPageSnapshot';
+import { createRemotePageSnapshotRecord, getRemotePageSnapshotScale } from '../utils/remotePageSnapshotGeometry';
 
 // Bundle the exact worker paired with react-pdf/pdfjs-dist. This avoids API and
 // worker version drift and keeps production independent from a public CDN.
@@ -163,9 +163,13 @@ const CachedPdfCanvasPage = React.memo(({
   onRenderSuccess,
   onRenderError
 }) => {
+  const canvasRef = useRef(null);
   const handleRenderSuccess = useCallback(
-    () => onRenderSuccess(pageNumber),
-    [onRenderSuccess, pageNumber]
+    () => {
+      if (canvasRef.current) canvasRef.current.dataset.pdfSnapshotScale = String(renderScale / 2);
+      onRenderSuccess(pageNumber, renderScale / 2);
+    },
+    [onRenderSuccess, pageNumber, renderScale]
   );
   const handleRenderError = useCallback(
     error => onRenderError(error, pageNumber),
@@ -173,6 +177,7 @@ const CachedPdfCanvasPage = React.memo(({
   );
   return (
     <Page
+      canvasRef={canvasRef}
       pageNumber={pageNumber}
       scale={renderScale}
       devicePixelRatio={devicePixelRatio}
@@ -418,10 +423,10 @@ const PDFViewer = ({
   }, [canvasPerformanceProfile, currentPage, getForegroundCanvasDpr, scale]);
   // Keep one durable snapshot per PDF page. UI zoom only changes its CSS
   // dimensions; it must not create another full-document IndexedDB cache.
-  // The version suffix prevents old scale-specific records from colliding
-  // with the new coordinate-independent key format.
+  // v4 also invalidates prefetched records which incorrectly stored 0.625
+  // for server rasters reduced by the pixel cap.
   const singlePageSnapshotScope = useMemo(() => (
-    `${singlePageSnapshotDocumentKey}|snapshot:v2`
+    `${singlePageSnapshotDocumentKey}|snapshot:v4`
   ), [singlePageSnapshotDocumentKey]);
   const remotePageCacheStateMatchesScope = isDirectionalPreviewStateForScope(
     remotePageCacheState,
@@ -758,24 +763,26 @@ const PDFViewer = ({
         // transient second canvas from pushing a large drawing over memory.
         return 'skipped';
       }
+      const generation = singlePageSnapshotGenerationRef.current;
+      const isCurrent = () => singlePageSnapshotGenerationRef.current === generation;
       singlePageSnapshotPendingRef.current.add(key);
-    const cssWidth = canvas.clientWidth || canvas.width;
-    const cssHeight = canvas.clientHeight || canvas.height;
-    canvas.toBlob(blob => {
-      if (!blob) {
-        singlePageSnapshotPendingRef.current.delete(key);
-        return;
+      const discard = () => {
+        if (isCurrent()) singlePageSnapshotPendingRef.current.delete(key);
+      };
+      try {
+        const status = capturePdfPageSnapshot({
+          canvas,
+          isCurrent,
+          onDiscard: discard,
+          onSnapshot: snapshot => installSinglePageSnapshot({ pageNumber, ...snapshot, persist: true })
+        });
+        if (status !== 'pending') discard();
+        return status;
+      } catch (error) {
+        discard();
+        console.warn('[PDF页面缓存] 截图失败:', error);
+        return 'unavailable';
       }
-      installSinglePageSnapshot({
-        pageNumber,
-        blob,
-        cssWidth,
-        cssHeight,
-        snapshotScale: singlePageScaleRef.current,
-        persist: true
-      });
-    }, 'image/png');
-      return 'pending';
     }, [getSinglePageSnapshotKey, installSinglePageSnapshot, singlePageSnapshotMaxPixels]);
 
   const activeSinglePageSnapshot = useMemo(() => {
@@ -943,7 +950,8 @@ const PDFViewer = ({
     };
   }
 
-  const handleSinglePageRenderSuccess = useCallback((pageNumber) => {
+  const handleSinglePageRenderSuccess = useCallback((pageNumber, renderedScale) => {
+    if (renderedScale !== singlePageScaleRef.current) return;
     renderedSinglePagesRef.current.add(Number(pageNumber));
     if (singlePageCurrentRef.current !== Number(pageNumber)) {
       scheduleNextSinglePagePreload();
@@ -1584,11 +1592,8 @@ const PDFViewer = ({
         blob,
         cssWidth: Number(pageInfo.width),
         cssHeight: Number(pageInfo.height),
-        // Server rasterizes at 1.25 PDF units. Existing display geometry stores
-        // the equivalent UI scale (react-pdf renders at UI scale * 2).
-        snapshotScale: Number(pageInfo.renderScale || 0) > 0
-          ? Number(pageInfo.renderScale) / 2
-          : 0.625,
+        // Use the actual raster scale, including reductions for the pixel cap.
+        snapshotScale: getRemotePageSnapshotScale(pageInfo),
         // A server snapshot is only an HTTP response until it is persisted.
         // Keep it in IndexedDB so later page turns do not download it again.
         persist: true
@@ -1638,7 +1643,7 @@ const PDFViewer = ({
       const standardInfo = state.pages?.[page];
       const renderScale = Number(previewInfo.renderScale || 0);
       const inferredSnapshotScale = standardInfo?.width > 0
-        ? 0.625 * (Number(previewInfo.width) / Number(standardInfo.width))
+        ? getRemotePageSnapshotScale(standardInfo) * (Number(previewInfo.width) / Number(standardInfo.width))
         : 0.625;
       handedToDecoder = true;
       return await installSinglePagePreview({
@@ -1897,16 +1902,13 @@ const PDFViewer = ({
           if (response.ok) {
             const blob = await response.blob();
             const pageInfo = remotePageCacheState.pages?.[page];
-            await putPdfPageSnapshot({
+            await putPdfPageSnapshot(createRemotePageSnapshotRecord({
               key: getSinglePageSnapshotKey(page),
               scope: singlePageSnapshotScope,
-              pageNumber: Number(page),
-              scale: 0.625,
+              pageNumber: page,
+              pageInfo,
               blob,
-              cssWidth: Number(pageInfo?.width || 1),
-              cssHeight: Number(pageInfo?.height || 1),
-              size: blob.size
-            });
+            }));
             notifySinglePageSnapshotPersisted(page);
           } else remotePageWarmRef.current.delete(warmKey);
         } catch (error) {
@@ -2020,16 +2022,13 @@ const PDFViewer = ({
         const blob = await response.blob();
         if (disposed || controller.signal.aborted) return;
         const pageInfo = remotePageCacheState.pages[page];
-        const savedKey = await putPdfPageSnapshot({
+        const savedKey = await putPdfPageSnapshot(createRemotePageSnapshotRecord({
           key: getSinglePageSnapshotKey(page),
           scope: singlePageSnapshotScope,
           pageNumber: page,
-          scale: 0.625,
+          pageInfo,
           blob,
-          cssWidth: Number(pageInfo?.width || 1),
-          cssHeight: Number(pageInfo?.height || 1),
-          size: blob.size
-        });
+        }));
         if (!savedKey) throw new Error('浏览器本地缓存不可用');
         const currentIndex = singlePageSnapshotDiskIndexRef.current;
         if (currentIndex.scope === singlePageSnapshotScope) {
